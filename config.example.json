@@ -1,13 +1,21 @@
 {
   "garmin": {
-    "username": "your-email@example.com",
-    "password": "your-garmin-password",
+    "username": "",
+    "password": "",
+    "username_env": "GARMIN_USERNAME",
+    "password_env": "GARMIN_PASSWORD",
     "domain": "garmin.com",
     "initial_start_date": "2025-01-01",
     "metric": true,
     "download_latest_activities": 50,
     "download_all_activities": 1000,
     "command": "garmindb_cli.py"
+  },
+  "retry": {
+    "attempts": 4,
+    "initial_delay_seconds": 60,
+    "backoff_multiplier": 2.0,
+    "max_delay_seconds": 900
   },
   "storage": {
     "healthdata_dir": "./data/HealthData"
@@ -23,4 +31,3 @@
     "activity_limit": 200
   }
 }
-

@@ -4,6 +4,8 @@ import json
 import os
 import shlex
 import subprocess
+import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -83,6 +85,19 @@ def _normalize_start_date(value: str) -> str:
 
 def build_garmindb_command(config: AppConfig, full: bool) -> list[str]:
     base = shlex.split(config.garmin_command, posix=os.name != "nt")
+    if not base:
+        raise ValueError("garmin.command must not be empty")
+    command_path = config.garmin_command_path
+    if command_path is not None:
+        base[0] = str(command_path)
+    if base and base[0].lower().endswith(".py"):
+        python_cmd = sys.executable
+        script_path = Path(base[0])
+        if script_path.exists():
+            candidate = script_path.with_name("python.exe")
+            if candidate.exists():
+                python_cmd = str(candidate)
+        base = [python_cmd, *base]
     args = ["--all", "--download", "--import", "--analyze"]
     if not full:
         args.append("--latest")
@@ -97,17 +112,77 @@ def run_garmindb_sync(config: AppConfig, full: bool) -> subprocess.CompletedProc
     env["HOME"] = str(config.runtime_home)
     env["USERPROFILE"] = str(config.runtime_home)
 
-    return subprocess.run(
-        cmd,
-        cwd=config.project_root,
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
+    attempts = max(config.garmin_retry_attempts, 1)
+    delay_seconds = max(config.garmin_retry_initial_delay_seconds, 1)
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    last_result: subprocess.CompletedProcess[str] | None = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=config.project_root,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                f"Unable to find GarminDB command: {cmd[0]}. "
+                "Update garmin.command in config.local.json or install GarminDB in .venv."
+            ) from exc
+        last_result = result
+
+        if result.stdout:
+            stdout_parts.append(result.stdout.rstrip())
+        if result.stderr:
+            stderr_parts.append(result.stderr.rstrip())
+
+        if result.returncode == 0 or not _is_rate_limited(result):
+            break
+        if attempt >= attempts:
+            break
+
+        wait_seconds = min(delay_seconds, config.garmin_retry_max_delay_seconds)
+        stdout_parts.append(
+            f"[garmin-obsidian-sync] Garmin rate limited the login request. "
+            f"Retrying in {wait_seconds} seconds (attempt {attempt + 1}/{attempts})."
+        )
+        time.sleep(wait_seconds)
+        delay_seconds = max(int(delay_seconds * config.garmin_retry_backoff_multiplier), wait_seconds + 1)
+
+    assert last_result is not None
+    return subprocess.CompletedProcess(
+        args=last_result.args,
+        returncode=last_result.returncode,
+        stdout="\n\n".join(part for part in stdout_parts if part).strip() + ("\n" if stdout_parts else ""),
+        stderr="\n\n".join(part for part in stderr_parts if part).strip() + ("\n" if stderr_parts else ""),
     )
+
+
+def _is_rate_limited(result: subprocess.CompletedProcess[str]) -> bool:
+    haystack = "\n".join(filter(None, [result.stdout, result.stderr])).lower()
+    return result.returncode != 0 and "429" in haystack and "too many requests" in haystack
 
 
 def find_sqlite_files(config: AppConfig) -> list[Path]:
     if not config.healthdata_dir.exists():
         return []
     return sorted(config.healthdata_dir.rglob("*.db"))
+
+
+def get_sync_diagnostics(config: AppConfig) -> dict[str, str]:
+    command_path = config.garmin_command_path
+    return {
+        "config_path": str(config.config_path),
+        "credentials_source": config.credentials_source,
+        "garmin_command": config.garmin_command,
+        "garmin_command_exists": str(command_path.exists()) if command_path is not None else "PATH lookup",
+        "healthdata_dir": str(config.healthdata_dir),
+        "healthdata_exists": str(config.healthdata_dir.exists()),
+        "obsidian_root": str(config.obsidian_root_path),
+        "obsidian_root_exists": str(config.obsidian_root_path.exists()),
+        "sqlite_db_count": str(len(find_sqlite_files(config))),
+    }

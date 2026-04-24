@@ -1,6 +1,7 @@
 .venv/
 __pycache__/
 *.pyc
+.env
 .pytest_cache/
 .mypy_cache/
 .coverage
@@ -11,4 +12,3 @@ __pycache__/
 data/
 exports/
 config.local.json
-

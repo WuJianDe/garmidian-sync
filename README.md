@@ -30,7 +30,7 @@
 - `src/garmin_obsidian_sync/exporter.py`
   從 GarminDB 產生的 SQLite 資料中整理每日筆記與活動筆記。
 - `src/garmin_obsidian_sync/cli.py`
-  提供 `init`、`sync`、`export`、`run` 四個指令。
+  提供 `init`、`sync`、`export`、`doctor`、`run` 五個指令。
 - `.github/workflows/ci.yml`
   每次 push / PR 自動跑基本驗證。
 - `CONTRIBUTING.md`
@@ -59,10 +59,54 @@ Copy-Item config.example.json config.local.json
 
 你需要修改以下欄位：
 
-- `garmin.username`
-- `garmin.password`
 - `garmin.initial_start_date`
 - `obsidian.vault_path`
+
+建議不要把 Garmin 帳密直接寫在 `config.local.json`。這個專案支援從環境變數讀取：
+
+- `GARMIN_USERNAME`
+- `GARMIN_PASSWORD`
+
+PowerShell 範例：
+
+```powershell
+$env:GARMIN_USERNAME="your-email@example.com"
+$env:GARMIN_PASSWORD="your-garmin-password"
+```
+
+如果你真的要從設定檔讀，也仍然可以填 `garmin.username` 與 `garmin.password`，但不建議。
+
+如果你不想每次手動輸入，也可以在專案根目錄建立 `.env` 檔：
+
+```powershell
+Copy-Item .env.example .env
+```
+
+然後把 `.env` 改成：
+
+```dotenv
+GARMIN_USERNAME=your-email@example.com
+GARMIN_PASSWORD=your-garmin-password
+```
+
+程式會在讀取 `config.local.json` 前自動載入 `.env`。`.env` 已加入 `.gitignore`，不會被提交。
+
+## 推薦日常流程
+
+第一次設定：
+
+```powershell
+python -m venv .venv
+.venv\Scripts\pip.exe install -r requirements.txt
+python -m src.garmin_obsidian_sync.cli --config config.local.json init
+python -m src.garmin_obsidian_sync.cli --config config.local.json doctor
+```
+
+之後日常同步：
+
+```powershell
+python -m src.garmin_obsidian_sync.cli --config config.local.json run
+```
 
 ### Obsidian 輸出位置
 
@@ -95,11 +139,26 @@ garmin-obsidian-sync sync --config config.local.json --full
 garmin-obsidian-sync export --config config.local.json
 ```
 
+檢查本機設定、資料夾與 GarminDB 指令：
+
+```powershell
+garmin-obsidian-sync doctor --config config.local.json
+```
+
 同步並匯出：
 
 ```powershell
 garmin-obsidian-sync run --config config.local.json
 ```
+
+### Garmin 限流重試
+
+如果 Garmin SSO 暫時回 `429 Too Many Requests`，同步器會自動等待後重試。預設值在 `retry` 區塊：
+
+- `attempts`: 最多重試次數
+- `initial_delay_seconds`: 第一次等待秒數
+- `backoff_multiplier`: 每次失敗後的退避倍率
+- `max_delay_seconds`: 每次等待的上限秒數
 
 ## 輸出結果
 

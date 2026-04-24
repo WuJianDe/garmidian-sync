@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .config import AppConfig, load_config, validate_config
 from .exporter import export_obsidian_notes
-from .garmindb_wrapper import ensure_runtime_dirs, run_garmindb_sync, write_garmindb_config
+from .garmindb_wrapper import ensure_runtime_dirs, get_sync_diagnostics, run_garmindb_sync, write_garmindb_config
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -22,6 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
     sync_parser.add_argument("--full", action="store_true", help="Run a full sync instead of --latest.")
 
     subparsers.add_parser("export", help="Export Markdown notes into Obsidian.")
+    subparsers.add_parser("doctor", help="Show config and environment diagnostics without printing secrets.")
 
     run_parser = subparsers.add_parser("run", help="Run sync then export.")
     run_parser.add_argument("--full", action="store_true", help="Run a full sync instead of --latest.")
@@ -71,6 +72,21 @@ def command_export(config_path: str) -> int:
     return 0
 
 
+def command_doctor(config_path: str) -> int:
+    config = load_config(config_path)
+    diagnostics = get_sync_diagnostics(config)
+    print("Garmin Obsidian Sync diagnostics")
+    for key, value in diagnostics.items():
+        print(f"- {key}: {value}")
+    try:
+        validate_config(config)
+    except ValueError as exc:
+        print(f"- validation: failed ({exc})", file=sys.stderr)
+        return 1
+    print("- validation: ok")
+    return 0
+
+
 def command_run(config_path: str, full: bool) -> int:
     sync_code = command_sync(config_path, full=full)
     if sync_code != 0:
@@ -81,15 +97,23 @@ def command_run(config_path: str, full: bool) -> int:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-
-    if args.command == "init":
-        return command_init(args.config)
-    if args.command == "sync":
-        return command_sync(args.config, full=args.full)
-    if args.command == "export":
-        return command_export(args.config)
-    if args.command == "run":
-        return command_run(args.config, full=args.full)
+    try:
+        if args.command == "init":
+            return command_init(args.config)
+        if args.command == "sync":
+            return command_sync(args.config, full=args.full)
+        if args.command == "export":
+            return command_export(args.config)
+        if args.command == "doctor":
+            return command_doctor(args.config)
+        if args.command == "run":
+            return command_run(args.config, full=args.full)
+    except FileNotFoundError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
 
     parser.error("Unknown command")
     return 2
