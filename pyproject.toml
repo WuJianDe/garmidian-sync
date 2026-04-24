@@ -5,11 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "garmin-obsidian-sync"
 version = "0.1.0"
-description = "Sync GarminDB data and export daily/activity notes to Obsidian."
+description = "Sync Garmin Connect data and export daily/activity notes to Obsidian."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "garmindb>=3.7.0",
+  "garminconnect>=0.3.2",
+  "curl_cffi>=0.15.0",
 ]
 
 [project.scripts]
@@ -20,4 +21,3 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-

@@ -1,6 +1,6 @@
 # Garmin Obsidian Sync
 
-把 GarminDB 下載下來的 Garmin Connect 資料，整理成 Obsidian 可直接閱讀的 Markdown 筆記。
+把 Garmin Connect 資料同步到本機，整理成 Obsidian 可直接閱讀的 Markdown 筆記。
 
 這個專案的目標有兩個：
 
@@ -9,28 +9,28 @@
 
 ## 架構
 
-`Garmin Connect -> GarminDB -> SQLite/下載檔 -> 本專案匯出器 -> Obsidian Markdown`
+`Garmin Connect -> python-garminconnect -> JSON 快照 -> 本專案匯出器 -> Obsidian Markdown`
 
-底層資料同步依賴 GarminDB。根據 GarminDB 官方 README，目前建議的流程是先安裝 `garmindb`，再執行：
-
-- 初次全量同步：`garmindb_cli.py --all --download --import --analyze`
-- 後續增量同步：`garmindb_cli.py --all --download --import --analyze --latest`
+底層資料同步依賴 `python-garminconnect`，並利用 token store 降低每次都重新登入 Garmin SSO 的需求。
 
 來源：
 
-- [GarminDB GitHub](https://github.com/tcgoetz/GarminDB)
-- [GarminDb PyPI](https://pypi.org/project/GarminDb/)
+- [python-garminconnect GitHub](https://github.com/cyberjunky/python-garminconnect)
 
 ## 專案內容
 
 - `config.example.json`
   你的 Garmin 帳號、Obsidian vault 路徑與輸出設定範例。
-- `src/garmin_obsidian_sync/garmindb_wrapper.py`
-  負責產生 GarminDB 設定檔並呼叫 GarminDB CLI。
+- `src/garmin_obsidian_sync/garmin_connect_sync.py`
+  負責登入 Garmin、抓取每日資料與活動資料，並保存成 JSON 快照。
 - `src/garmin_obsidian_sync/exporter.py`
-  從 GarminDB 產生的 SQLite 資料中整理每日筆記與活動筆記。
+  從 JSON 快照中整理每日筆記與活動筆記。
 - `src/garmin_obsidian_sync/cli.py`
   提供 `init`、`sync`、`export`、`doctor`、`run` 五個指令。
+- `src/garmin_obsidian_sync/webapp.py`
+  提供本機 Web 控制台。
+- `start-web-ui.bat`
+  Windows 一鍵啟動本機服務與瀏覽器頁面。
 - `.github/workflows/ci.yml`
   每次 push / PR 自動跑基本驗證。
 - `CONTRIBUTING.md`
@@ -121,6 +121,24 @@ python -m src.garmin_obsidian_sync.cli --config config.local.json run
 
 ## 使用方式
 
+### 最方便的方式：點一下打開網頁
+
+直接雙擊專案根目錄的 `start-web-ui.bat`，它會啟動本機服務，然後自動打開瀏覽器控制台。
+
+預設網址：
+
+`http://127.0.0.1:8765/`
+
+你可以在網頁裡直接：
+
+- 檢查環境
+- 抓最新資料並匯出
+- 完整同步並匯出
+- 只匯出 Obsidian
+- 打開 Obsidian 匯出資料夾
+
+### 指令方式
+
 初始化本地設定與目錄：
 
 ```powershell
@@ -139,7 +157,7 @@ garmin-obsidian-sync sync --config config.local.json --full
 garmin-obsidian-sync export --config config.local.json
 ```
 
-檢查本機設定、資料夾與 GarminDB 指令：
+檢查本機設定、資料夾與同步狀態：
 
 ```powershell
 garmin-obsidian-sync doctor --config config.local.json
@@ -160,6 +178,12 @@ garmin-obsidian-sync run --config config.local.json
 - `backoff_multiplier`: 每次失敗後的退避倍率
 - `max_delay_seconds`: 每次等待的上限秒數
 
+### Token 快取
+
+系統會把 Garmin 登入 token 保存在專案內的 `.runtime/home/garminconnect_tokens`。
+
+如果 token 仍有效，之後同步就不一定需要重新打 Garmin SSO。
+
 ## 輸出結果
 
 預設會在你的 Obsidian vault 生成：
@@ -171,9 +195,9 @@ garmin-obsidian-sync run --config config.local.json
 
 ## 注意事項
 
-- 本專案會把 GarminDB 的設定與執行環境放在專案內的 `.runtime/home/.GarminDb`，避免污染你使用者家目錄。
-- GarminDB 會在指定的 `healthdata_dir` 下建立自己的資料結構與 SQLite 檔。
-- 匯出器用的是「盡量相容 GarminDB schema」的策略：它會掃描 `.db` 檔與可辨識的日期/活動欄位，自動生成筆記。
+- 本專案會把 Garmin token 與執行環境放在專案內的 `.runtime/home`，避免污染你使用者家目錄。
+- 同步資料會保存在指定的 `healthdata_dir/raw` 之下，格式是 JSON 快照。
+- 匯出器會從 JSON 快照生成 Obsidian 筆記，方便你自己看，也方便 Codex 後續分析。
 - 如果你未來想加上睡眠分數、HRV、Body Battery、訓練準備度等專門模板，這個骨架可以再往下客製。
 
 ## Git Flow

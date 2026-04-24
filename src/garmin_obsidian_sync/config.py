@@ -42,7 +42,7 @@ class AppConfig:
     garmin_metric: bool
     garmin_download_latest_activities: int
     garmin_download_all_activities: int
-    garmin_command: str
+    garmin_latest_lookback_days: int
     garmin_retry_attempts: int
     garmin_retry_initial_delay_seconds: int
     garmin_retry_backoff_multiplier: float
@@ -60,12 +60,24 @@ class AppConfig:
         return self.project_root / ".runtime" / "home"
 
     @property
-    def garmindb_config_dir(self) -> Path:
-        return self.runtime_home / ".GarminDb"
+    def garmin_tokenstore_path(self) -> Path:
+        return self.runtime_home / "garminconnect_tokens"
 
     @property
-    def garmindb_config_path(self) -> Path:
-        return self.garmindb_config_dir / "GarminConnectConfig.json"
+    def raw_daily_dir(self) -> Path:
+        return self.healthdata_dir / "raw" / "daily"
+
+    @property
+    def raw_activity_dir(self) -> Path:
+        return self.healthdata_dir / "raw" / "activities"
+
+    @property
+    def metadata_dir(self) -> Path:
+        return self.healthdata_dir / "metadata"
+
+    @property
+    def sync_state_path(self) -> Path:
+        return self.metadata_dir / "sync_state.json"
 
     @property
     def obsidian_root_path(self) -> Path:
@@ -95,16 +107,6 @@ class AppConfig:
             raw: dict[str, Any] = json.load(fh)
         garmin = raw.get("garmin", {})
         return bool(str(garmin.get("username", "")) or str(garmin.get("password", "")))
-
-    @property
-    def garmin_command_path(self) -> Path | None:
-        command = self.garmin_command.strip()
-        if not command:
-            return None
-        if any(sep in command for sep in ("/", "\\")):
-            return _resolve_path(self.project_root, command)
-        return None
-
 
 def load_config(config_path: str | Path) -> AppConfig:
     resolved = Path(config_path).resolve()
@@ -136,7 +138,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         garmin_metric=bool(garmin.get("metric", True)),
         garmin_download_latest_activities=int(garmin.get("download_latest_activities", 50)),
         garmin_download_all_activities=int(garmin.get("download_all_activities", 1000)),
-        garmin_command=str(garmin.get("command", "garmindb_cli.py")),
+        garmin_latest_lookback_days=int(garmin.get("latest_lookback_days", 7)),
         garmin_retry_attempts=int(retry.get("attempts", 4)),
         garmin_retry_initial_delay_seconds=int(retry.get("initial_delay_seconds", 60)),
         garmin_retry_backoff_multiplier=float(retry.get("backoff_multiplier", 2.0)),
@@ -163,6 +165,8 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError(f"Missing required config fields: {', '.join(missing)}")
     if config.garmin_retry_attempts < 1:
         raise ValueError("retry.attempts must be >= 1")
+    if config.garmin_latest_lookback_days < 1:
+        raise ValueError("garmin.latest_lookback_days must be >= 1")
     if config.garmin_retry_initial_delay_seconds < 1:
         raise ValueError("retry.initial_delay_seconds must be >= 1")
     if config.garmin_retry_backoff_multiplier < 1:

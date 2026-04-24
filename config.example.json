@@ -7,9 +7,9 @@
     "domain": "garmin.com",
     "initial_start_date": "2025-01-01",
     "metric": true,
+    "latest_lookback_days": 7,
     "download_latest_activities": 50,
-    "download_all_activities": 1000,
-    "command": "garmindb_cli.py"
+    "download_all_activities": 1000
   },
   "retry": {
     "attempts": 4,

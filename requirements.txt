@@ -1,2 +1,2 @@
-garmindb>=3.7.0
-
+garminconnect>=0.3.2
+curl_cffi>=0.15.0

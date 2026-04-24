@@ -1,217 +1,197 @@
 from __future__ import annotations
 
-import sqlite3
-from collections import defaultdict
-from dataclasses import dataclass
+import json
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+from typing import Any
 
 from .config import AppConfig
-from .garmindb_wrapper import ensure_runtime_dirs, find_sqlite_files
+from .garmin_connect_sync import ensure_runtime_dirs
 
 
-DATE_COLUMN_CANDIDATES = (
-    "date",
-    "day",
-    "calendar_date",
-    "summary_date",
-    "local_date",
-    "start_date",
-    "begin_date",
-)
+def export_obsidian_notes(config: AppConfig) -> dict[str, int]:
+    ensure_runtime_dirs(config)
+    daily_files = sorted(config.raw_daily_dir.glob("*.json"))
+    activity_files = sorted(config.raw_activity_dir.rglob("*.json"))
+    if not daily_files and not activity_files:
+        raise FileNotFoundError(f"No Garmin JSON snapshot files found under {config.healthdata_dir}")
 
-ACTIVITY_ID_CANDIDATES = (
-    "activity_id",
-    "activityid",
-    "id",
-)
-
-ACTIVITY_TIME_CANDIDATES = (
-    "begin_timestamp",
-    "start_time",
-    "start_timestamp",
-    "start_datetime",
-    "begin_datetime",
-    "time",
-    "date",
-)
-
-ACTIVITY_TYPE_CANDIDATES = (
-    "sport",
-    "activity_type",
-    "type",
-    "name",
-    "sub_sport",
-)
-
-DAILY_TABLE_HINTS = (
-    "daily",
-    "summary",
-    "sleep",
-    "weight",
-    "rhr",
-    "rest",
-    "stress",
-    "steps",
-    "monitor",
-    "body",
-    "training",
-)
-
-DAILY_TABLE_EXCLUDES = (
-    "activity",
-    "record",
-    "lap",
-    "sample",
-    "debug",
-)
+    daily_count = _export_daily_notes(config, daily_files)
+    activity_count = _export_activity_notes(config, activity_files)
+    _write_schema_note(config, daily_files)
+    return {"daily_notes": daily_count, "activity_notes": activity_count}
 
 
-@dataclass(slots=True)
-class TableInfo:
-    db_path: Path
-    name: str
-    kind: str
-    columns: list[str]
+def _export_daily_notes(config: AppConfig, daily_files: list[Path]) -> int:
+    written = 0
+    daily_links: list[str] = []
 
-    @property
-    def lower_columns(self) -> list[str]:
-        return [column.lower() for column in self.columns]
+    for daily_file in sorted(daily_files, reverse=True):
+        payload = _read_json(daily_file)
+        day = str(payload.get("date", daily_file.stem))
+        dt = datetime.strptime(day, "%Y-%m-%d")
+        note_dir = config.obsidian_daily_path / dt.strftime("%Y") / dt.strftime("%m")
+        note_dir.mkdir(parents=True, exist_ok=True)
+        note_path = note_dir / f"{day}.md"
+
+        sections: list[str] = []
+        for section_name in (
+            "stats",
+            "sleep",
+            "body_battery",
+            "hrv",
+            "training_readiness",
+            "stress",
+            "heart_rates",
+            "daily_steps",
+            "hydration",
+        ):
+            block = payload.get(section_name)
+            if not isinstance(block, dict):
+                continue
+            sections.append(_render_section(section_name, block))
+
+        if not sections:
+            sections.append("## Raw Data\n\n- No structured daily sections found.")
+
+        frontmatter = _render_frontmatter({"type": "garmin-daily", "date": day})
+        body = "\n\n".join(
+            [
+                frontmatter,
+                f"# Garmin Daily Summary - {day}",
+                _render_daily_summary(payload),
+                *sections,
+            ]
+        )
+        note_path.write_text(body + "\n", encoding="utf-8")
+        rel = note_path.relative_to(config.obsidian_vault_path).as_posix()
+        daily_links.append(f"- [[{rel[:-3]}|{day}]]")
+        written += 1
+
+    index_body = "\n".join(["# Garmin Daily Index", "", f"Total notes: {written}", "", *daily_links])
+    (config.obsidian_index_path / "Daily Index.md").write_text(index_body + "\n", encoding="utf-8")
+    return written
 
 
-def _quote(identifier: str) -> str:
-    return '"' + identifier.replace('"', '""') + '"'
+def _export_activity_notes(config: AppConfig, activity_files: list[Path]) -> int:
+    written = 0
+    activity_links: list[str] = []
+    for activity_file in sorted(activity_files, reverse=True)[: config.activity_limit]:
+        payload = _read_json(activity_file)
+        activity_id = str(payload.get("activityId") or activity_file.stem)
+        activity_type = str(payload.get("activityType", {}).get("typeKey") or payload.get("activityName") or "activity")
+        raw_time = str(payload.get("startTimeLocal") or payload.get("startTimeGMT") or "unknown")
+        activity_date = raw_time[:10] if len(raw_time) >= 10 else "unknown-date"
+        year = activity_date[:4] if len(activity_date) >= 4 else "unknown"
+        slug_type = activity_type.lower().replace(" ", "-")
+        note_dir = config.obsidian_activity_path / year
+        note_dir.mkdir(parents=True, exist_ok=True)
+        note_path = note_dir / f"{activity_date}-{slug_type}-{activity_id}.md"
+
+        frontmatter = _render_frontmatter(
+            {
+                "type": "garmin-activity",
+                "activity_id": activity_id,
+                "activity_type": activity_type,
+                "activity_time": raw_time,
+            }
+        )
+        body = "\n\n".join(
+            [
+                frontmatter,
+                f"# Garmin Activity - {activity_type}",
+                _render_activity_summary(payload),
+                "## Raw Data",
+                _render_key_values(payload),
+            ]
+        )
+        note_path.write_text(body + "\n", encoding="utf-8")
+        rel = note_path.relative_to(config.obsidian_vault_path).as_posix()
+        activity_links.append(f"- [[{rel[:-3]}|{activity_date} {activity_type} #{activity_id}]]")
+        written += 1
+
+    index_body = "\n".join(["# Garmin Activity Index", "", f"Total notes: {written}", "", *activity_links])
+    (config.obsidian_index_path / "Activity Index.md").write_text(index_body + "\n", encoding="utf-8")
+    return written
 
 
-def _list_tables(db_path: Path) -> list[TableInfo]:
-    items: list[TableInfo] = []
-    with sqlite3.connect(db_path) as conn:
-        rows = conn.execute(
-            """
-            SELECT name, type
-            FROM sqlite_master
-            WHERE type IN ('table', 'view')
-              AND name NOT LIKE 'sqlite_%'
-            ORDER BY name
-            """
-        ).fetchall()
-        for name, kind in rows:
-            columns = [row[1] for row in conn.execute(f"PRAGMA table_info({_quote(name)})").fetchall()]
-            items.append(TableInfo(db_path=db_path, name=name, kind=kind, columns=columns))
-    return items
+def _render_section(name: str, payload: dict[str, Any]) -> str:
+    pretty_name = name.replace("_", " ").title()
+    if payload.get("ok") is False:
+        return f"## {pretty_name}\n\n- Error: {payload.get('error', 'unknown error')}"
+    data = payload.get("data")
+    if isinstance(data, dict):
+        return f"## {pretty_name}\n\n{_render_key_values(data)}"
+    if isinstance(data, list):
+        items = "\n".join(f"- {json.dumps(item, ensure_ascii=False)}" for item in data[:50])
+        return f"## {pretty_name}\n\n{items or '- No data'}"
+    return f"## {pretty_name}\n\n- {_stringify(data) or 'No data'}"
 
 
-def _pick_column(columns: Iterable[str], candidates: tuple[str, ...]) -> str | None:
-    normalized = {column.lower(): column for column in columns}
-    for candidate in candidates:
-        if candidate in normalized:
-            return normalized[candidate]
+def _render_daily_summary(payload: dict[str, Any]) -> str:
+    metrics: list[str] = []
+    stats_data = _extract_data(payload.get("stats"))
+    sleep_data = _extract_data(payload.get("sleep"))
+    readiness_data = _extract_data(payload.get("training_readiness"))
+    body_battery = _extract_data(payload.get("body_battery"))
+
+    _append_if_found(metrics, stats_data, ("steps", "totalSteps"), "Steps")
+    _append_if_found(metrics, stats_data, ("floorClimbed",), "Floors")
+    _append_if_found(metrics, sleep_data, ("overallSleepScore", "sleepScores", "overall"), "Sleep Score")
+    _append_if_found(metrics, readiness_data, ("score", "trainingReadinessScore"), "Training Readiness")
+    _append_if_found(metrics, body_battery, ("chargedValue", "bodyBatteryMostRecentValue"), "Body Battery")
+
+    if not metrics:
+        return "Daily metrics are available in the sections below."
+    return "\n".join(f"- **{label}**: {value}" for label, value in metrics)
+
+
+def _render_activity_summary(payload: dict[str, Any]) -> str:
+    metrics: list[tuple[str, str]] = []
+    for label, keys in (
+        ("Distance", ("distance",)),
+        ("Duration", ("duration", "movingDuration")),
+        ("Calories", ("calories",)),
+        ("Average HR", ("averageHR",)),
+        ("Max HR", ("maxHR",)),
+    ):
+        value = _find_nested_value(payload, keys)
+        if value not in (None, ""):
+            metrics.append((label, _stringify(value)))
+    if not metrics:
+        return "- Activity details are listed below."
+    return "\n".join(f"- **{label}**: {value}" for label, value in metrics)
+
+
+def _append_if_found(metrics: list[tuple[str, str]], data: Any, keys: tuple[str, ...], label: str) -> None:
+    value = _find_nested_value(data, keys)
+    if value not in (None, ""):
+        metrics.append((label, _stringify(value)))
+
+
+def _extract_data(block: Any) -> Any:
+    if isinstance(block, dict):
+        return block.get("data")
     return None
 
 
-def _table_name_matches(name: str, includes: tuple[str, ...], excludes: tuple[str, ...]) -> bool:
-    lowered = name.lower()
-    return any(token in lowered for token in includes) and not any(token in lowered for token in excludes)
-
-
-def _discover_daily_sources(db_files: list[Path]) -> list[tuple[TableInfo, str]]:
-    sources: list[tuple[TableInfo, str]] = []
-    for db_path in db_files:
-        for table in _list_tables(db_path):
-            date_column = _pick_column(table.columns, DATE_COLUMN_CANDIDATES)
-            if not date_column:
-                continue
-            if not _table_name_matches(table.name, DAILY_TABLE_HINTS, DAILY_TABLE_EXCLUDES):
-                continue
-            sources.append((table, date_column))
-    return sources
-
-
-def _discover_activity_source(db_files: list[Path]) -> tuple[TableInfo, str, str | None, str | None] | None:
-    scored: list[tuple[int, TableInfo, str, str | None, str | None]] = []
-    for db_path in db_files:
-        for table in _list_tables(db_path):
-            lowered_name = table.name.lower()
-            if "activ" not in lowered_name:
-                continue
-            id_column = _pick_column(table.columns, ACTIVITY_ID_CANDIDATES)
-            time_column = _pick_column(table.columns, ACTIVITY_TIME_CANDIDATES)
-            type_column = _pick_column(table.columns, ACTIVITY_TYPE_CANDIDATES)
-            score = 0
-            if id_column:
-                score += 3
-            if time_column:
-                score += 3
-            if type_column:
-                score += 2
-            if table.kind == "view":
-                score += 1
-            if "summary" in lowered_name:
-                score += 1
-            if score >= 5:
-                scored.append((score, table, id_column or "id", time_column, type_column))
-    if not scored:
+def _find_nested_value(data: Any, keys: tuple[str, ...]) -> Any:
+    if data is None:
         return None
-    scored.sort(key=lambda item: item[0], reverse=True)
-    _, table, id_column, time_column, type_column = scored[0]
-    return table, id_column, time_column, type_column
-
-
-def _fetch_distinct_dates(db_path: Path, table: str, date_column: str) -> list[str]:
-    with sqlite3.connect(db_path) as conn:
-        rows = conn.execute(
-            f"""
-            SELECT DISTINCT date({_quote(date_column)}) AS d
-            FROM {_quote(table)}
-            WHERE {_quote(date_column)} IS NOT NULL
-            ORDER BY d DESC
-            """
-        ).fetchall()
-    return [row[0] for row in rows if row[0]]
-
-
-def _fetch_rows_for_day(
-    db_path: Path,
-    table: str,
-    date_column: str,
-    day: str,
-    limit: int,
-) -> list[dict[str, object]]:
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            f"""
-            SELECT *
-            FROM {_quote(table)}
-            WHERE date({_quote(date_column)}) = date(?)
-            LIMIT ?
-            """,
-            (day, limit),
-        ).fetchall()
-    return [dict(row) for row in rows]
-
-
-def _fetch_activity_rows(
-    table: TableInfo,
-    id_column: str,
-    time_column: str | None,
-    limit: int,
-) -> list[dict[str, object]]:
-    order_by = f"ORDER BY {_quote(time_column)} DESC" if time_column else ""
-    with sqlite3.connect(table.db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            f"""
-            SELECT *
-            FROM {_quote(table.name)}
-            WHERE {_quote(id_column)} IS NOT NULL
-            {order_by}
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-    return [dict(row) for row in rows]
+    if isinstance(data, dict):
+        for key in keys:
+            if key in data:
+                return data[key]
+        for value in data.values():
+            found = _find_nested_value(value, keys)
+            if found not in (None, ""):
+                return found
+    if isinstance(data, list):
+        for item in data:
+            found = _find_nested_value(item, keys)
+            if found not in (None, ""):
+                return found
+    return None
 
 
 def _stringify(value: object) -> str:
@@ -219,6 +199,8 @@ def _stringify(value: object) -> str:
         return ""
     if isinstance(value, float):
         return f"{value:.2f}".rstrip("0").rstrip(".")
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
     return str(value)
 
 
@@ -231,177 +213,36 @@ def _render_frontmatter(pairs: dict[str, str]) -> str:
     return "\n".join(lines)
 
 
-def _render_key_values(row: dict[str, object]) -> str:
+def _render_key_values(payload: Any, prefix: str = "") -> str:
     lines: list[str] = []
-    for key, value in row.items():
-        text = _stringify(value)
-        if text == "":
-            continue
-        lines.append(f"- **{key}**: {text}")
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            current = f"{prefix}.{key}" if prefix else key
+            if isinstance(value, dict):
+                lines.append(f"- **{current}**:")
+                nested = _render_key_values(value, current)
+                if nested:
+                    lines.append(nested)
+            elif isinstance(value, list):
+                lines.append(f"- **{current}**: {json.dumps(value[:20], ensure_ascii=False)}")
+            else:
+                text = _stringify(value)
+                if text != "":
+                    lines.append(f"- **{current}**: {text}")
     return "\n".join(lines) if lines else "- No data"
 
 
-def export_obsidian_notes(config: AppConfig) -> dict[str, int]:
-    ensure_runtime_dirs(config)
-    db_files = find_sqlite_files(config)
-    if not db_files:
-        raise FileNotFoundError(f"No SQLite files found under {config.healthdata_dir}")
-
-    daily_count = _export_daily_notes(config, db_files)
-    activity_count = _export_activity_notes(config, db_files)
-    _write_schema_note(config, db_files)
-    return {"daily_notes": daily_count, "activity_notes": activity_count}
-
-
-def _export_daily_notes(config: AppConfig, db_files: list[Path]) -> int:
-    sources = _discover_daily_sources(db_files)
-    if not sources:
-        return 0
-
-    days: set[str] = set()
-    for table, date_column in sources:
-        days.update(_fetch_distinct_dates(table.db_path, table.name, date_column))
-
-    written = 0
-    daily_links: list[str] = []
-    for day in sorted(days, reverse=True):
-        dt = datetime.strptime(day, "%Y-%m-%d")
-        note_dir = config.obsidian_daily_path / dt.strftime("%Y") / dt.strftime("%m")
-        note_dir.mkdir(parents=True, exist_ok=True)
-        note_path = note_dir / f"{day}.md"
-
-        sections: list[str] = []
-        for table, date_column in sources:
-            rows = _fetch_rows_for_day(
-                table.db_path,
-                table.name,
-                date_column,
-                day,
-                config.daily_limit_per_section,
-            )
-            if not rows:
-                continue
-            title = f"## {table.db_path.stem}.{table.name}"
-            rendered_rows = []
-            for index, row in enumerate(rows, start=1):
-                rendered_rows.append(f"### Row {index}\n{_render_key_values(row)}")
-            sections.append(f"{title}\n\n" + "\n\n".join(rendered_rows))
-
-        if not sections:
-            continue
-
-        frontmatter = _render_frontmatter(
-            {
-                "type": "garmin-daily",
-                "date": day,
-            }
-        )
-        body = "\n\n".join(
-            [
-                frontmatter,
-                f"# Garmin Daily Summary - {day}",
-                f"Generated from `{len(db_files)}` SQLite database file(s).",
-                *sections,
-            ]
-        )
-        note_path.write_text(body + "\n", encoding="utf-8")
-        rel = note_path.relative_to(config.obsidian_vault_path).as_posix()
-        daily_links.append(f"- [[{rel[:-3]}|{day}]]")
-        written += 1
-
-    index_body = "\n".join(
-        [
-            "# Garmin Daily Index",
-            "",
-            f"Total notes: {written}",
-            "",
-            *daily_links,
-        ]
-    )
-    (config.obsidian_index_path / "Daily Index.md").write_text(index_body + "\n", encoding="utf-8")
-    return written
-
-
-def _export_activity_notes(config: AppConfig, db_files: list[Path]) -> int:
-    source = _discover_activity_source(db_files)
-    if not source:
-        return 0
-
-    table, id_column, time_column, type_column = source
-    rows = _fetch_activity_rows(table, id_column, time_column, config.activity_limit)
-
-    written = 0
-    activity_links: list[str] = []
-    for row in rows:
-        raw_activity_id = _stringify(row.get(id_column))
-        if not raw_activity_id:
-            continue
-
-        raw_time = _stringify(row.get(time_column)) if time_column else ""
-        safe_time = raw_time.replace(":", "").replace(" ", "-").replace("/", "-")
-        activity_date = raw_time[:10] if len(raw_time) >= 10 else "unknown-date"
-        year = activity_date[:4] if len(activity_date) >= 4 else "unknown"
-        activity_type = _stringify(row.get(type_column)) if type_column else "activity"
-        slug_type = activity_type.lower().replace(" ", "-") or "activity"
-
-        note_dir = config.obsidian_activity_path / year
-        note_dir.mkdir(parents=True, exist_ok=True)
-        note_name = f"{activity_date}-{safe_time[-4:] if safe_time else 'time'}-{slug_type}-{raw_activity_id}.md"
-        note_path = note_dir / note_name
-
-        frontmatter = _render_frontmatter(
-            {
-                "type": "garmin-activity",
-                "activity_id": raw_activity_id,
-                "activity_type": activity_type,
-                "activity_time": raw_time or "unknown",
-            }
-        )
-        body = "\n\n".join(
-            [
-                frontmatter,
-                f"# Garmin Activity - {activity_type}",
-                f"- **activity_id**: {raw_activity_id}",
-                f"- **source**: {table.db_path.stem}.{table.name}",
-                "",
-                "## Data",
-                _render_key_values(row),
-            ]
-        )
-        note_path.write_text(body + "\n", encoding="utf-8")
-        rel = note_path.relative_to(config.obsidian_vault_path).as_posix()
-        activity_links.append(f"- [[{rel[:-3]}|{activity_date} {activity_type} #{raw_activity_id}]]")
-        written += 1
-
-    index_body = "\n".join(
-        [
-            "# Garmin Activity Index",
-            "",
-            f"Total notes: {written}",
-            "",
-            *activity_links,
-        ]
-    )
-    (config.obsidian_index_path / "Activity Index.md").write_text(index_body + "\n", encoding="utf-8")
-    return written
-
-
-def _write_schema_note(config: AppConfig, db_files: list[Path]) -> None:
-    grouped: dict[str, list[str]] = defaultdict(list)
-    for db_path in db_files:
-        lines: list[str] = []
-        for table in _list_tables(db_path):
-            lines.append(f"## {table.name} ({table.kind})")
-            lines.append("")
-            for column in table.columns:
-                lines.append(f"- {column}")
-            lines.append("")
-        grouped[db_path.name] = lines
-
+def _write_schema_note(config: AppConfig, daily_files: list[Path]) -> None:
     parts = ["# Garmin Schema Snapshot", ""]
-    for db_name, lines in grouped.items():
-        parts.append(f"# {db_name}")
+    for daily_file in sorted(daily_files, reverse=True)[:20]:
+        payload = _read_json(daily_file)
+        parts.append(f"## {daily_file.name}")
         parts.append("")
-        parts.extend(lines)
+        for key, value in payload.items():
+            parts.append(f"- {key}: {type(value).__name__}")
+        parts.append("")
     (config.obsidian_index_path / "Schema Snapshot.md").write_text("\n".join(parts) + "\n", encoding="utf-8")
 
+
+def _read_json(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))

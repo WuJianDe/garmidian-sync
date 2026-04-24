@@ -1,24 +1,22 @@
 from __future__ import annotations
 
 import argparse
-import shutil
 import sys
-from pathlib import Path
 
 from .config import AppConfig, load_config, validate_config
 from .exporter import export_obsidian_notes
-from .garmindb_wrapper import ensure_runtime_dirs, get_sync_diagnostics, run_garmindb_sync, write_garmindb_config
+from .garmin_connect_sync import get_sync_diagnostics, initialize_storage, run_garmin_sync
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Sync GarminDB data and export notes to Obsidian.")
+    parser = argparse.ArgumentParser(description="Sync Garmin Connect data and export notes to Obsidian.")
     parser.add_argument("--config", default="config.local.json", help="Path to config JSON file.")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("init", help="Create runtime directories and GarminDB config.")
+    subparsers.add_parser("init", help="Create runtime directories and local sync storage.")
 
-    sync_parser = subparsers.add_parser("sync", help="Run GarminDB sync.")
+    sync_parser = subparsers.add_parser("sync", help="Run Garmin Connect sync.")
     sync_parser.add_argument("--full", action="store_true", help="Run a full sync instead of --latest.")
 
     subparsers.add_parser("export", help="Export Markdown notes into Obsidian.")
@@ -37,31 +35,22 @@ def _load_and_validate(config_path: str) -> AppConfig:
 
 def command_init(config_path: str) -> int:
     config = load_config(config_path)
-    ensure_runtime_dirs(config)
-    write_garmindb_config(config)
+    initialize_storage(config)
     print(f"Initialized runtime at: {config.runtime_home}")
-    print(f"GarminDB config: {config.garmindb_config_path}")
+    print(f"Garmin token store: {config.garmin_tokenstore_path}")
+    print(f"Health data root: {config.healthdata_dir}")
     print(f"Obsidian export root: {config.obsidian_root_path}")
     return 0
 
 
 def command_sync(config_path: str, full: bool) -> int:
     config = _load_and_validate(config_path)
-    ensure_runtime_dirs(config)
-
-    if shutil.which("garmindb_cli.py") is None and " " not in config.garmin_command and Path(config.garmin_command).name == config.garmin_command:
-        print(
-            "Warning: garmindb_cli.py was not found in PATH. "
-            "If you installed GarminDB in a virtual environment, activate it first or set garmin.command in config.",
-            file=sys.stderr,
-        )
-
-    result = run_garmindb_sync(config, full=full)
-    if result.stdout:
-        print(result.stdout)
-    if result.stderr:
-        print(result.stderr, file=sys.stderr)
-    return result.returncode
+    result = run_garmin_sync(config, full=full)
+    print(
+        f"Synced {result.daily_files} daily snapshot(s) and {result.activity_files} activity file(s) "
+        f"for {result.start_date} to {result.end_date}."
+    )
+    return 0
 
 
 def command_export(config_path: str) -> int:
