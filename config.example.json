@@ -1,0 +1,26 @@
+{
+  "garmin": {
+    "username": "your-email@example.com",
+    "password": "your-garmin-password",
+    "domain": "garmin.com",
+    "initial_start_date": "2025-01-01",
+    "metric": true,
+    "download_latest_activities": 50,
+    "download_all_activities": 1000,
+    "command": "garmindb_cli.py"
+  },
+  "storage": {
+    "healthdata_dir": "./data/HealthData"
+  },
+  "obsidian": {
+    "vault_path": "D:/ObsidianVault",
+    "root_folder": "Health/Garmin",
+    "daily_folder": "Daily",
+    "activity_folder": "Activities"
+  },
+  "export": {
+    "daily_limit_per_section": 10,
+    "activity_limit": 200
+  }
+}
+
