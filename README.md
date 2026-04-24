@@ -31,6 +31,12 @@
   從 GarminDB 產生的 SQLite 資料中整理每日筆記與活動筆記。
 - `src/garmin_obsidian_sync/cli.py`
   提供 `init`、`sync`、`export`、`run` 四個指令。
+- `.github/workflows/ci.yml`
+  每次 push / PR 自動跑基本驗證。
+- `CONTRIBUTING.md`
+  團隊協作、commit 與 PR 流程。
+- `docs/git-workflow.md`
+  這個 repo 的 git 使用方式。
 
 ## 安裝
 
@@ -111,3 +117,17 @@ garmin-obsidian-sync run --config config.local.json
 - 匯出器用的是「盡量相容 GarminDB schema」的策略：它會掃描 `.db` 檔與可辨識的日期/活動欄位，自動生成筆記。
 - 如果你未來想加上睡眠分數、HRV、Body Battery、訓練準備度等專門模板，這個骨架可以再往下客製。
 
+## Git Flow
+
+這個 repo 已內建基本協作流程：
+
+- `main` 作為穩定分支
+- 功能開發使用 `feature/*`
+- 問題修正使用 `fix/*`
+- 維護工作使用 `chore/*`
+- PR 合併前跑 GitHub Actions CI
+
+詳細流程請看：
+
+- [CONTRIBUTING.md](./CONTRIBUTING.md)
+- [docs/git-workflow.md](./docs/git-workflow.md)

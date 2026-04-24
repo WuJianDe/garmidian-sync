@@ -1,0 +1,26 @@
+name: Feature request
+description: Suggest a new workflow, exporter, analysis view, or automation.
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or opportunity
+      description: What are you trying to do that is currently hard?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the workflow or capability you want.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Extra context
+      description: Include sample Obsidian output, Garmin data fields, or analysis goals if helpful.
+
