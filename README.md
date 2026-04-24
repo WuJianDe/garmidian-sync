@@ -1,17 +1,12 @@
 # Garmin Obsidian Sync
 
-把 Garmin Connect 資料同步到本機，整理成 Obsidian 可直接閱讀的 Markdown 筆記。
-
-這個專案的目標有兩個：
-
-1. 定期把 Garmin 活動與每日狀態同步到本機。
-2. 在 Obsidian 中生成「每天一篇」與「每次活動一篇」的筆記，方便你自己看，也方便 Codex 後續分析。
+把 Garmin Connect 資料同步到本機，整理成 Obsidian 筆記，並透過本機網頁直接查看每日與活動紀錄。
 
 ## 架構
 
 `Garmin Connect -> python-garminconnect -> JSON 快照 -> 本專案匯出器 -> Obsidian Markdown`
 
-底層資料同步依賴 `python-garminconnect`，並利用 token store 降低每次都重新登入 Garmin SSO 的需求。
+底層資料同步依賴 `python-garminconnect`，並利用 token store 降低每次都重新登入 Garmin SSO 的需求。前端使用 `Vite`，後端使用 Python API。
 
 來源：
 
@@ -28,7 +23,9 @@
 - `src/garmin_obsidian_sync/cli.py`
   提供 `init`、`sync`、`export`、`doctor`、`run` 五個指令。
 - `src/garmin_obsidian_sync/webapp.py`
-  提供本機 Web 控制台。
+  提供本機 API 與靜態前端入口。
+- `frontend/`
+  Vite 前端，負責同步畫面、紀錄列表與筆記閱讀介面。
 - `start-web-ui.bat`
   Windows 一鍵啟動本機服務與瀏覽器頁面。
 - `.github/workflows/ci.yml`
@@ -45,8 +42,8 @@
 ```powershell
 python -m venv .venv
 .venv\Scripts\activate
-pip install -r requirements.txt
-pip install -e .
+.venv\Scripts\pip.exe install -r requirements.txt
+.venv\Scripts\pip.exe install -e .
 ```
 
 ## 設定
@@ -96,16 +93,15 @@ GARMIN_PASSWORD=your-garmin-password
 第一次設定：
 
 ```powershell
-python -m venv .venv
 .venv\Scripts\pip.exe install -r requirements.txt
-python -m src.garmin_obsidian_sync.cli --config config.local.json init
-python -m src.garmin_obsidian_sync.cli --config config.local.json doctor
+.venv\Scripts\python.exe -m src.garmin_obsidian_sync.cli --config config.local.json init
+.venv\Scripts\python.exe -m src.garmin_obsidian_sync.cli --config config.local.json doctor
 ```
 
 之後日常同步：
 
 ```powershell
-python -m src.garmin_obsidian_sync.cli --config config.local.json run
+.venv\Scripts\python.exe -m src.garmin_obsidian_sync.cli --config config.local.json run
 ```
 
 ### Obsidian 輸出位置
@@ -123,7 +119,7 @@ python -m src.garmin_obsidian_sync.cli --config config.local.json run
 
 ### 最方便的方式：點一下打開網頁
 
-直接雙擊專案根目錄的 `start-web-ui.bat`，它會啟動本機服務，然後自動打開瀏覽器控制台。
+直接雙擊專案根目錄的 `start-web-ui.bat`，它會啟動本機服務，然後自動打開瀏覽器頁面。
 
 預設網址：
 
@@ -131,43 +127,77 @@ python -m src.garmin_obsidian_sync.cli --config config.local.json run
 
 你可以在網頁裡直接：
 
-- 檢查環境
 - 抓最新資料並匯出
 - 完整同步並匯出
-- 只匯出 Obsidian
-- 打開 Obsidian 匯出資料夾
+- 查看已匯出的每日紀錄
+- 查看已匯出的活動紀錄
+- 在頁面中直接閱讀筆記內容
+- 搜尋已匯出的每日與活動紀錄
 
 ### 指令方式
 
 初始化本地設定與目錄：
 
 ```powershell
-garmin-obsidian-sync init --config config.local.json
+.venv\Scripts\python.exe -m src.garmin_obsidian_sync.cli --config config.local.json init
 ```
 
 初次全量同步：
 
 ```powershell
-garmin-obsidian-sync sync --config config.local.json --full
+.venv\Scripts\python.exe -m src.garmin_obsidian_sync.cli --config config.local.json sync --full
 ```
 
 只輸出 Markdown：
 
 ```powershell
-garmin-obsidian-sync export --config config.local.json
+.venv\Scripts\python.exe -m src.garmin_obsidian_sync.cli --config config.local.json export
 ```
 
 檢查本機設定、資料夾與同步狀態：
 
 ```powershell
-garmin-obsidian-sync doctor --config config.local.json
+.venv\Scripts\python.exe -m src.garmin_obsidian_sync.cli --config config.local.json doctor
 ```
 
 同步並匯出：
 
 ```powershell
-garmin-obsidian-sync run --config config.local.json
+.venv\Scripts\python.exe -m src.garmin_obsidian_sync.cli --config config.local.json run
 ```
+
+## 前端開發
+
+這個專案現在使用 `Vite` 作為前端開發環境。
+
+第一次安裝：
+
+```powershell
+cd frontend
+npm install
+```
+
+前端開發模式：
+
+```powershell
+cd frontend
+npm run dev
+```
+
+預設開發網址：
+
+`http://127.0.0.1:5173/`
+
+開發模式下會自動代理到本機 Python API `http://127.0.0.1:8765/`。
+
+正式建置：
+
+```powershell
+cd frontend
+npm run build
+```
+
+建置完成後，`start-web-ui.bat` 啟動的 Python 服務會直接提供 `frontend/dist` 裡的靜態前端。
 
 ### Garmin 限流重試
 
@@ -197,8 +227,8 @@ garmin-obsidian-sync run --config config.local.json
 
 - 本專案會把 Garmin token 與執行環境放在專案內的 `.runtime/home`，避免污染你使用者家目錄。
 - 同步資料會保存在指定的 `healthdata_dir/raw` 之下，格式是 JSON 快照。
-- 匯出器會從 JSON 快照生成 Obsidian 筆記，方便你自己看，也方便 Codex 後續分析。
-- 如果你未來想加上睡眠分數、HRV、Body Battery、訓練準備度等專門模板，這個骨架可以再往下客製。
+- 匯出器會從 JSON 快照生成 Obsidian 筆記，方便你自己看，也方便後續分析。
+- `frontend/dist` 和 `frontend/node_modules` 都是本機建置產物，不需要提交到 Git。
 
 ## Git Flow
 

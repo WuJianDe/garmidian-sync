@@ -47,8 +47,8 @@ def command_sync(config_path: str, full: bool) -> int:
     config = _load_and_validate(config_path)
     result = run_garmin_sync(config, full=full)
     print(
-        f"Synced {result.daily_files} daily snapshot(s) and {result.activity_files} activity file(s) "
-        f"for {result.start_date} to {result.end_date}."
+        f"本次同步完成：{result.start_date} 到 {result.end_date}，"
+        f"新增或更新 {result.daily_files} 份每日快照、{result.activity_files} 份活動資料。"
     )
     return 0
 
@@ -56,15 +56,18 @@ def command_sync(config_path: str, full: bool) -> int:
 def command_export(config_path: str) -> int:
     config = _load_and_validate(config_path)
     result = export_obsidian_notes(config)
-    print(f"Exported {result['daily_notes']} daily notes and {result['activity_notes']} activity notes.")
-    print(f"Obsidian root: {config.obsidian_root_path}")
+    print(
+        f"匯出完成：目前共整理 {result['daily_notes']} 篇每日筆記、"
+        f"{result['activity_notes']} 篇活動筆記。"
+    )
+    print(f"Obsidian 目錄：{config.obsidian_root_path}")
     return 0
 
 
 def command_doctor(config_path: str) -> int:
     config = load_config(config_path)
     diagnostics = get_sync_diagnostics(config)
-    print("Garmin Obsidian Sync diagnostics")
+    print("Garmin Obsidian Sync 診斷資訊")
     for key, value in diagnostics.items():
         print(f"- {key}: {value}")
     try:
@@ -101,6 +104,9 @@ def main() -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    except RuntimeError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 

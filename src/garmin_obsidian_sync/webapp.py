@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
+import mimetypes
 import threading
 import time
 import webbrowser
@@ -13,298 +13,66 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import StringIO
 from pathlib import Path
 from typing import Callable
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
-from .cli import command_doctor, command_export, command_init, command_run, command_sync
-from .config import load_config
+from .cli import command_run
+from .config import load_config, validate_config
+from .garmin_connect_sync import initialize_storage
 
 
-HTML_PAGE = """<!doctype html>
+FALLBACK_HTML = """<!doctype html>
 <html lang="zh-Hant">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Garmin Obsidian Sync</title>
+  <title>Garmin 健康紀錄中心</title>
   <style>
-    :root {
-      --bg: #f4efe7;
-      --card: #fffaf3;
-      --ink: #1f2a24;
-      --muted: #647067;
-      --line: #dccfbc;
-      --accent: #2c6e49;
-      --accent-2: #d68c45;
-      --danger: #b8402a;
-      --shadow: 0 18px 50px rgba(44, 47, 38, 0.12);
-    }
-    * { box-sizing: border-box; }
     body {
       margin: 0;
       font-family: "Segoe UI", "Microsoft JhengHei", sans-serif;
-      color: var(--ink);
-      background:
-        radial-gradient(circle at top right, rgba(214, 140, 69, 0.20), transparent 24rem),
-        linear-gradient(180deg, #f7f1e8 0%, var(--bg) 100%);
-      min-height: 100vh;
+      background: linear-gradient(180deg, #ecf0e8 0%, #f6f2ea 100%);
+      color: #1f2924;
     }
     .shell {
-      max-width: 1120px;
+      max-width: 840px;
       margin: 0 auto;
-      padding: 32px 20px 48px;
+      padding: 42px 20px;
     }
-    .hero {
-      display: grid;
-      gap: 18px;
-      grid-template-columns: 1.2fr 0.8fr;
-      align-items: stretch;
-      margin-bottom: 24px;
-    }
-    .panel {
-      background: rgba(255, 250, 243, 0.92);
-      border: 1px solid var(--line);
-      border-radius: 22px;
-      box-shadow: var(--shadow);
-      backdrop-filter: blur(10px);
-    }
-    .hero-main {
+    .card {
+      background: rgba(255, 252, 247, 0.92);
+      border: 1px solid #d9cfbf;
+      border-radius: 24px;
+      box-shadow: 0 20px 50px rgba(31, 41, 36, 0.1);
       padding: 28px;
     }
-    .eyebrow {
-      display: inline-block;
-      padding: 6px 10px;
-      border-radius: 999px;
-      background: rgba(44, 110, 73, 0.10);
-      color: var(--accent);
-      font-size: 12px;
-      font-weight: 700;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-    }
     h1 {
-      margin: 16px 0 10px;
-      font-size: clamp(30px, 4vw, 52px);
-      line-height: 1.04;
+      margin: 0 0 12px;
+      font-size: 40px;
     }
-    .lead {
-      margin: 0;
-      color: var(--muted);
-      font-size: 16px;
-      line-height: 1.7;
-      max-width: 52rem;
+    p, li {
+      line-height: 1.75;
+      color: #55625a;
     }
-    .hero-side {
-      padding: 24px;
-      display: grid;
-      gap: 14px;
-      align-content: start;
-    }
-    .metric {
-      padding: 14px 16px;
-      border-radius: 16px;
-      background: #fff;
-      border: 1px solid var(--line);
-    }
-    .metric-label {
-      font-size: 12px;
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      margin-bottom: 8px;
-    }
-    .metric-value {
-      font-size: 18px;
-      font-weight: 700;
-      word-break: break-all;
-    }
-    .layout {
-      display: grid;
-      grid-template-columns: 0.95fr 1.05fr;
-      gap: 18px;
-    }
-    .actions, .log {
-      padding: 22px;
-    }
-    .section-title {
-      margin: 0 0 8px;
-      font-size: 20px;
-    }
-    .section-copy {
-      margin: 0 0 18px;
-      color: var(--muted);
-      line-height: 1.6;
-    }
-    .button-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 12px;
-    }
-    button {
-      border: none;
-      border-radius: 16px;
-      padding: 14px 16px;
-      font-size: 15px;
-      font-weight: 700;
-      cursor: pointer;
-      transition: transform 120ms ease, opacity 120ms ease, box-shadow 120ms ease;
-      box-shadow: 0 8px 18px rgba(44, 110, 73, 0.12);
-    }
-    button:hover { transform: translateY(-1px); }
-    button:disabled { cursor: not-allowed; opacity: 0.55; transform: none; box-shadow: none; }
-    .primary { background: var(--accent); color: white; }
-    .secondary { background: #fff; color: var(--ink); border: 1px solid var(--line); }
-    .warm { background: var(--accent-2); color: #23180d; }
-    .status-bar {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin-top: 18px;
-      padding-top: 18px;
-      border-top: 1px solid var(--line);
-    }
-    .pill {
-      border-radius: 999px;
-      padding: 8px 12px;
-      font-size: 13px;
-      font-weight: 700;
-      background: rgba(44, 110, 73, 0.10);
-      color: var(--accent);
-    }
-    .pill.error {
-      background: rgba(184, 64, 42, 0.10);
-      color: var(--danger);
-    }
-    .pill.running {
-      background: rgba(214, 140, 69, 0.16);
-      color: #8b5a21;
-    }
-    pre {
-      margin: 0;
-      min-height: 420px;
-      max-height: 70vh;
-      overflow: auto;
-      padding: 18px;
-      background: #1d221f;
-      color: #e8f0e8;
-      border-radius: 18px;
-      line-height: 1.55;
-      font-family: Consolas, "Cascadia Code", monospace;
-      font-size: 13px;
-      white-space: pre-wrap;
-      word-break: break-word;
-    }
-    .footer-note {
-      margin-top: 12px;
-      color: var(--muted);
-      font-size: 13px;
-    }
-    @media (max-width: 920px) {
-      .hero, .layout { grid-template-columns: 1fr; }
-      .button-grid { grid-template-columns: 1fr; }
+    code {
+      background: #f3eee5;
+      padding: 2px 6px;
+      border-radius: 8px;
     }
   </style>
 </head>
 <body>
   <div class="shell">
-    <div class="hero">
-      <section class="panel hero-main">
-        <span class="eyebrow">Local Control Panel</span>
-        <h1>Garmin 到 Obsidian 的同步面板</h1>
-        <p class="lead">這是你本機的控制頁。你可以在這裡檢查環境、抓最新資料、做完整同步，或直接打開 Obsidian 匯出資料夾，不用再手動輸入指令。</p>
-      </section>
-      <aside class="panel hero-side">
-        <div class="metric">
-          <div class="metric-label">設定檔</div>
-          <div class="metric-value" id="configPath">-</div>
-        </div>
-        <div class="metric">
-          <div class="metric-label">Obsidian 目錄</div>
-          <div class="metric-value" id="obsidianRoot">-</div>
-        </div>
-        <div class="metric">
-          <div class="metric-label">每日快照數量</div>
-          <div class="metric-value" id="dbCount">-</div>
-        </div>
-      </aside>
-    </div>
-
-    <div class="layout">
-      <section class="panel actions">
-        <h2 class="section-title">操作</h2>
-        <p class="section-copy">建議先按「檢查環境」。如果狀態正常，再按「抓最新資料並匯出」。</p>
-        <div class="button-grid">
-          <button class="secondary" data-action="doctor">檢查環境</button>
-          <button class="primary" data-action="run-latest">抓最新資料並匯出</button>
-          <button class="warm" data-action="run-full">完整同步並匯出</button>
-          <button class="secondary" data-action="export">只匯出 Obsidian</button>
-          <button class="secondary" data-action="init">重新初始化</button>
-          <button class="secondary" data-action="open-obsidian">打開 Obsidian 資料夾</button>
-        </div>
-        <div class="status-bar">
-          <span class="pill" id="taskStatus">等待操作</span>
-          <span class="pill" id="taskName">目前任務：無</span>
-          <span class="pill" id="lastCode">最後狀態碼：-</span>
-        </div>
-        <div class="footer-note">提示：同步過程如果遇到 Garmin 限流，系統會自動延遲後重試。</div>
-      </section>
-
-      <section class="panel log">
-        <h2 class="section-title">執行紀錄</h2>
-        <p class="section-copy">這裡會顯示最新任務的輸出結果與診斷資訊。</p>
-        <pre id="log">尚未執行任何動作。</pre>
-      </section>
+    <div class="card">
+      <h1>Garmin 健康紀錄中心</h1>
+      <p>後端 API 已啟動，但前端建置檔尚未就緒。</p>
+      <p>請在專案根目錄執行以下其中一種方式：</p>
+      <ul>
+        <li>開發模式：在 <code>frontend/</code> 執行 <code>npm install</code>，再執行 <code>npm run dev</code></li>
+        <li>正式模式：在 <code>frontend/</code> 執行 <code>npm run build</code>，之後重新啟動這個服務</li>
+      </ul>
+      <p>API 仍可使用：<code>/api/status</code>、<code>/api/records</code>、<code>/api/note</code></p>
     </div>
   </div>
-
-  <script>
-    const statusEl = document.getElementById("taskStatus");
-    const taskEl = document.getElementById("taskName");
-    const codeEl = document.getElementById("lastCode");
-    const logEl = document.getElementById("log");
-    const configPathEl = document.getElementById("configPath");
-    const obsidianRootEl = document.getElementById("obsidianRoot");
-    const dbCountEl = document.getElementById("dbCount");
-    const buttons = Array.from(document.querySelectorAll("button[data-action]"));
-
-    function setButtonsDisabled(disabled) {
-      buttons.forEach((button) => {
-        if (button.dataset.action === "open-obsidian") {
-          button.disabled = false;
-          return;
-        }
-        button.disabled = disabled;
-      });
-    }
-
-    async function refreshStatus() {
-      const res = await fetch("/api/status");
-      const data = await res.json();
-      statusEl.textContent = data.running ? "執行中" : "待命中";
-      statusEl.className = "pill " + (data.running ? "running" : (data.last_exit_code && data.last_exit_code !== 0 ? "error" : ""));
-      taskEl.textContent = "目前任務：" + (data.task_name || "無");
-      codeEl.textContent = "最後狀態碼：" + (data.last_exit_code ?? "-");
-      logEl.textContent = data.log || "尚未執行任何動作。";
-      configPathEl.textContent = data.config_path || "-";
-      obsidianRootEl.textContent = data.obsidian_root || "-";
-      dbCountEl.textContent = String(data.daily_json_count ?? "-");
-      setButtonsDisabled(Boolean(data.running));
-    }
-
-    async function runAction(action) {
-      const res = await fetch("/api/actions/" + action, { method: "POST" });
-      const data = await res.json();
-      if (!res.ok) {
-        alert(data.error || "操作失敗");
-      }
-      await refreshStatus();
-    }
-
-    buttons.forEach((button) => {
-      button.addEventListener("click", () => runAction(button.dataset.action));
-    });
-
-    refreshStatus();
-    setInterval(refreshStatus, 2000);
-  </script>
 </body>
 </html>
 """
@@ -316,20 +84,25 @@ class AppState:
     running: bool = False
     task_name: str = ""
     last_exit_code: int | None = None
+    last_result: str = "尚未執行任何動作。"
     log: str = "尚未執行任何動作。"
     updated_at: float = field(default_factory=time.time)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def snapshot(self) -> dict[str, object]:
         config = load_config(self.config_path)
+        sync_state = {}
+        if config.sync_state_path.exists():
+            sync_state = json.loads(config.sync_state_path.read_text(encoding="utf-8"))
         return {
             "running": self.running,
             "task_name": self.task_name,
             "last_exit_code": self.last_exit_code,
+            "last_result": self.last_result,
             "log": self.log,
-            "config_path": str(Path(self.config_path).resolve()),
-            "obsidian_root": str(config.obsidian_root_path),
-            "daily_json_count": len(list(config.raw_daily_dir.glob("*.json"))) if config.raw_daily_dir.exists() else 0,
+            "last_sync_at": str(sync_state.get("last_sync_at", "")),
+            "daily_count": len(list(config.obsidian_daily_path.rglob("*.md"))) if config.obsidian_daily_path.exists() else 0,
+            "activity_count": len(list(config.obsidian_activity_path.rglob("*.md"))) if config.obsidian_activity_path.exists() else 0,
         }
 
 
@@ -360,11 +133,12 @@ def _start_background_task(state: AppState, task_name: str, task: Callable[[], i
         try:
             code, output = _run_capture(task)
         except Exception as exc:  # noqa: BLE001
-            output = f"Unhandled error:\n{exc}"
+            output = f"執行時發生未處理錯誤：\n{exc}"
             code = 1
         with state.lock:
             state.running = False
             state.last_exit_code = code
+            state.last_result = "成功" if code == 0 else "失敗"
             state.log = output
             state.updated_at = time.time()
 
@@ -373,37 +147,65 @@ def _start_background_task(state: AppState, task_name: str, task: Callable[[], i
     return True
 
 
-def build_handler(state: AppState) -> type[BaseHTTPRequestHandler]:
+def build_handler(state: AppState, frontend_dist: Path | None) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "GarminObsidianSyncWeb/0.1"
+        server_version = "GarminObsidianSyncApi/0.2"
 
         def _send_json(self, payload: dict[str, object], status: int = HTTPStatus.OK) -> None:
-            body = json.dumps(payload).encode("utf-8")
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self._send_cors_headers()
             self.end_headers()
             self.wfile.write(body)
 
-        def _send_html(self, html: str) -> None:
-            body = html.encode("utf-8")
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
+        def _send_bytes(self, body: bytes, content_type: str, status: int = HTTPStatus.OK) -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
+            self._send_cors_headers()
             self.end_headers()
             self.wfile.write(body)
+
+        def _send_cors_headers(self) -> None:
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+        def do_OPTIONS(self) -> None:  # noqa: N802
+            self.send_response(HTTPStatus.NO_CONTENT)
+            self._send_cors_headers()
+            self.end_headers()
 
         def do_GET(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
-            if parsed.path == "/":
-                self._send_html(HTML_PAGE)
-                return
             if parsed.path == "/api/status":
                 with state.lock:
                     payload = state.snapshot()
                 self._send_json(payload)
                 return
-            self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
+            if parsed.path == "/api/records":
+                params = parse_qs(parsed.query)
+                kind = params.get("kind", ["daily"])[0]
+                try:
+                    self._send_json({"records": _list_notes(state.config_path, kind)})
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            if parsed.path == "/api/note":
+                params = parse_qs(parsed.query)
+                kind = params.get("kind", ["daily"])[0]
+                note_id = params.get("id", [""])[0]
+                try:
+                    self._send_json(_read_note(state.config_path, kind, note_id))
+                except FileNotFoundError:
+                    self._send_json({"error": "找不到指定紀錄。"}, status=HTTPStatus.NOT_FOUND)
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            self._serve_frontend(parsed.path)
 
         def do_POST(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
@@ -412,20 +214,9 @@ def build_handler(state: AppState) -> type[BaseHTTPRequestHandler]:
                 return
 
             action = parsed.path.rsplit("/", 1)[-1]
-            if action == "open-obsidian":
-                config = load_config(state.config_path)
-                os.startfile(config.obsidian_root_path)  # type: ignore[attr-defined]
-                self._send_json({"ok": True})
-                return
-
             tasks: dict[str, tuple[str, Callable[[], int]]] = {
-                "doctor": ("檢查環境", lambda: command_doctor(state.config_path)),
-                "init": ("重新初始化", lambda: command_init(state.config_path)),
-                "export": ("只匯出 Obsidian", lambda: command_export(state.config_path)),
                 "run-latest": ("抓最新資料並匯出", lambda: command_run(state.config_path, full=False)),
                 "run-full": ("完整同步並匯出", lambda: command_run(state.config_path, full=True)),
-                "sync-latest": ("只抓最新資料", lambda: command_sync(state.config_path, full=False)),
-                "sync-full": ("完整抓取 Garmin 資料", lambda: command_sync(state.config_path, full=True)),
             }
             task = tasks.get(action)
             if task is None:
@@ -433,9 +224,33 @@ def build_handler(state: AppState) -> type[BaseHTTPRequestHandler]:
                 return
             started = _start_background_task(state, task[0], task[1])
             if not started:
-                self._send_json({"error": "Another task is already running."}, status=HTTPStatus.CONFLICT)
+                self._send_json({"error": "目前已有任務執行中，請稍候。"}, status=HTTPStatus.CONFLICT)
                 return
             self._send_json({"ok": True})
+
+        def _serve_frontend(self, request_path: str) -> None:
+            if frontend_dist is None or not frontend_dist.exists():
+                self._send_bytes(FALLBACK_HTML.encode("utf-8"), "text/html; charset=utf-8")
+                return
+
+            normalized = request_path if request_path not in {"", "/"} else "/index.html"
+            relative = Path(unquote(normalized.lstrip("/")))
+            target = (frontend_dist / relative).resolve()
+            frontend_root = frontend_dist.resolve()
+
+            if frontend_root not in target.parents and target != frontend_root:
+                self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
+                return
+
+            if not target.exists() or target.is_dir():
+                target = frontend_dist / "index.html"
+
+            if not target.exists():
+                self._send_bytes(FALLBACK_HTML.encode("utf-8"), "text/html; charset=utf-8")
+                return
+
+            content_type, _ = mimetypes.guess_type(target.name)
+            self._send_bytes(target.read_bytes(), content_type or "application/octet-stream")
 
         def log_message(self, format: str, *args: object) -> None:  # noqa: A003
             return
@@ -444,7 +259,7 @@ def build_handler(state: AppState) -> type[BaseHTTPRequestHandler]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run a local web UI for Garmin Obsidian Sync.")
+    parser = argparse.ArgumentParser(description="Run the local API/static server for Garmin Obsidian Sync.")
     parser.add_argument("--config", default="config.local.json", help="Path to config JSON file.")
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind the local web server.")
     parser.add_argument("--port", default=8765, type=int, help="Port to bind the local web server.")
@@ -455,19 +270,131 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+    try:
+        config = load_config(args.config)
+        validate_config(config)
+        initialize_storage(config)
+    except Exception as exc:  # noqa: BLE001
+        print(f"啟動失敗：{exc}", flush=True)
+        return 1
+
+    frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
     state = AppState(config_path=args.config)
-    server = ThreadingHTTPServer((args.host, args.port), build_handler(state))
+    server = ThreadingHTTPServer((args.host, args.port), build_handler(state, frontend_dist if frontend_dist.exists() else None))
     url = f"http://{args.host}:{args.port}/"
-    print(f"Garmin Obsidian web UI running at {url}")
+    print("啟動檢查完成")
+    print(f"設定檔：{config.config_path}")
+    print(f"資料目錄：{config.healthdata_dir}")
+    print(f"Obsidian 目錄：{config.obsidian_root_path}")
+    print(f"Token 目錄：{config.garmin_tokenstore_path}")
+    print(f"本機 API / 前端入口：{url}")
+    if frontend_dist.exists():
+        print(f"前端建置目錄：{frontend_dist}")
+    else:
+        print("前端建置目錄尚未生成，將顯示後備頁面。")
     if not args.no_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("Shutting down web UI...")
+        print("正在關閉本機服務...")
     finally:
         server.server_close()
     return 0
+
+
+def _note_root(config_path: str, kind: str) -> Path:
+    config = load_config(config_path)
+    if kind == "daily":
+        return config.obsidian_daily_path
+    if kind == "activity":
+        return config.obsidian_activity_path
+    raise ValueError("不支援的紀錄類型。")
+
+
+def _list_notes(config_path: str, kind: str) -> list[dict[str, object]]:
+    root = _note_root(config_path, kind)
+    if not root.exists():
+        return []
+    records: list[dict[str, object]] = []
+    for path in sorted(root.rglob("*.md"), key=lambda item: item.stat().st_mtime, reverse=True):
+        note = path.read_text(encoding="utf-8")
+        title = _extract_title(note) or path.stem
+        subtitle = _extract_subtitle(path, kind)
+        preview = _extract_preview(note)
+        records.append(
+            {
+                "id": path.relative_to(root).as_posix(),
+                "title": title,
+                "subtitle": subtitle,
+                "preview": preview,
+                "updated_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(path.stat().st_mtime)),
+            }
+        )
+    return records
+
+
+def _read_note(config_path: str, kind: str, note_id: str) -> dict[str, object]:
+    if not note_id:
+        raise ValueError("缺少紀錄 ID。")
+    root = _note_root(config_path, kind)
+    note_path = (root / note_id).resolve()
+    root_resolved = root.resolve()
+    if root_resolved not in note_path.parents and note_path != root_resolved:
+        raise ValueError("非法的紀錄路徑。")
+    if not note_path.exists() or note_path.suffix.lower() != ".md":
+        raise FileNotFoundError(note_path)
+    note = note_path.read_text(encoding="utf-8")
+    return {
+        "id": note_id,
+        "title": _extract_title(note) or note_path.stem,
+        "subtitle": _extract_subtitle(note_path, kind),
+        "path": str(note_path),
+        "content": _prepare_note_content_for_web(note),
+    }
+
+
+def _extract_title(note: str) -> str:
+    for line in note.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            return stripped[2:].strip()
+    return ""
+
+
+def _extract_subtitle(path: Path, kind: str) -> str:
+    if kind == "daily":
+        return path.stem
+    parts = path.stem.split("-")
+    if len(parts) >= 4:
+        return f"{parts[0]}-{parts[1]}-{parts[2]} | {parts[-1]}"
+    return path.stem
+
+
+def _extract_preview(note: str) -> str:
+    lines = []
+    for raw_line in note.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("---") or line.startswith("#") or line.startswith("```") or line.startswith("<details"):
+            continue
+        if line.startswith("<summary>"):
+            continue
+        lines.append(line)
+        if len(lines) >= 2:
+            break
+    return " ".join(lines)[:140]
+
+
+def _prepare_note_content_for_web(note: str) -> str:
+    start_marker = "<details>\n<summary>原始"
+    start = note.find(start_marker)
+    if start == -1:
+        return note
+    end = note.find("</details>", start)
+    if end == -1:
+        return note
+    replacement = "## 原始資料\n\n已在網頁閱讀模式中收合。若要看完整 raw JSON，請回 Obsidian 查看。\n"
+    return note[:start].rstrip() + "\n\n" + replacement + note[end + len("</details>") :]
 
 
 if __name__ == "__main__":

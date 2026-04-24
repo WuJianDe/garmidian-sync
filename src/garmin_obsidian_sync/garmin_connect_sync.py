@@ -136,8 +136,8 @@ def _login(config: AppConfig) -> Garmin:
             )
             time.sleep(wait_seconds)
             delay_seconds = max(int(delay_seconds * config.garmin_retry_backoff_multiplier), wait_seconds + 1)
-        except GarminConnectAuthenticationError:
-            raise
+        except GarminConnectAuthenticationError as exc:
+            raise RuntimeError("Garmin 登入失敗，請檢查帳號密碼、驗證狀態，或稍後再試。") from exc
         except GarminConnectConnectionError as exc:
             last_error = exc
             if attempt >= attempts:
@@ -151,7 +151,9 @@ def _login(config: AppConfig) -> Garmin:
             delay_seconds = max(int(delay_seconds * config.garmin_retry_backoff_multiplier), wait_seconds + 1)
 
     assert last_error is not None
-    raise last_error
+    if isinstance(last_error, GarminConnectTooManyRequestsError):
+        raise RuntimeError("Garmin 目前限制登入請求次數，請稍後再試。") from last_error
+    raise RuntimeError(f"Garmin 連線失敗：{last_error}") from last_error
 
 
 def _tokenstore_ready(path: Path) -> bool:
@@ -184,7 +186,7 @@ def _collect_day_payload(client: Garmin, day: date) -> dict[str, Any]:
         "body_battery": _safe_call(lambda: client.get_body_battery(day_text)),
         "hrv": _safe_call(lambda: client.get_hrv_data(day_text)),
         "training_readiness": _safe_call(lambda: client.get_training_readiness(day_text)),
-        "daily_steps": _safe_call(lambda: client.get_daily_steps(day_text)),
+        "daily_steps": _safe_call(lambda: client.get_daily_steps(day_text, day_text)),
         "hydration": _safe_call(lambda: client.get_hydration_data(day_text)),
     }
 

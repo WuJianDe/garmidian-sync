@@ -32,7 +32,7 @@ Recommended commit prefixes:
 Examples:
 
 - `feat: add training readiness note section`
-- `fix: normalize GarminDB start date format`
+- `fix: normalize Garmin Connect sync range`
 - `docs: document release checklist`
 
 ## Pull request workflow
@@ -45,8 +45,10 @@ Examples:
 Local validation commands:
 
 ```powershell
-python -m py_compile src\garmin_obsidian_sync\config.py src\garmin_obsidian_sync\garmindb_wrapper.py src\garmin_obsidian_sync\exporter.py src\garmin_obsidian_sync\cli.py
+.venv\Scripts\python.exe -m py_compile src\garmin_obsidian_sync\config.py src\garmin_obsidian_sync\garmin_connect_sync.py src\garmin_obsidian_sync\exporter.py src\garmin_obsidian_sync\cli.py src\garmin_obsidian_sync\webapp.py
 garmin-obsidian-sync --help
+cd frontend
+npm run build
 ```
 
 If your change touches Garmin sync or Obsidian export, include a short note in the PR describing what you tested locally.
