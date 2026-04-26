@@ -8,6 +8,31 @@ from typing import Any
 
 from .config import AppConfig
 from .garmin_connect_sync import ensure_runtime_dirs
+from .formatters import (
+    activity_end_time_local as _core_activity_end_time_local,
+    format_calories as _core_format_calories,
+    format_datetime_text as _core_format_datetime_text,
+    format_distance as _core_format_distance,
+    format_milliseconds as _core_format_milliseconds,
+    format_ml as _core_format_ml,
+    format_number as _core_format_number,
+    format_pace as _core_format_pace,
+    format_ratio as _core_format_ratio,
+    format_seconds as _core_format_seconds,
+    timestamp_to_local_text as _core_timestamp_to_local_text,
+    translate_bool as _core_translate_bool,
+)
+from .runtime import CancelCheck, ProgressCallback, emit_progress, ensure_not_cancelled
+from .translations import (
+    ACTIVITY_TYPE_LABELS,
+    VALUE_TRANSLATIONS,
+    activity_display_name as _core_activity_display_name,
+    activity_type_key as _core_activity_type_key,
+    is_running_activity as _core_is_running_activity,
+    stringify as _core_stringify,
+    translate_code_text as _core_translate_code_text,
+    translate_value as _core_translate_value,
+)
 
 SECTION_TITLES = {
     "stats": "每日總覽",
@@ -21,77 +46,61 @@ SECTION_TITLES = {
     "hydration": "補水",
 }
 
-ACTIVITY_TYPE_LABELS = {
-    "running": "跑步",
-    "walking": "步行",
-    "cycling": "騎車",
-    "road_biking": "公路騎車",
-    "mountain_biking": "登山車",
-    "yoga": "瑜伽",
-    "strength_training": "肌力訓練",
-    "traditional_strength_training": "重量訓練",
-    "cardio_training": "有氧訓練",
-    "pilates": "皮拉提斯",
-    "swimming": "游泳",
-    "treadmill_running": "跑步機",
-}
 
-VALUE_TRANSLATIONS = {
-    "BALANCED": "平衡",
-    "LOW": "偏低",
-    "MODERATE": "中等",
-    "HIGH": "高",
-    "VERY_GOOD": "很好",
-    "GOOD": "良好",
-    "FAIR": "普通",
-    "POOR": "較差",
-    "NONE": "無",
-    "UNKNOWN": "未知",
-    "groups": "群組可見",
-    "private": "私人",
-    "public": "公開",
-    "uncategorized": "未分類",
-    "yoga": "瑜伽",
-    "running": "跑步",
-    "walking": "步行",
-    "cycling": "騎車",
-    "traditional_strength_training": "重量訓練",
-    "strength_training": "肌力訓練",
-    "cardio_training": "有氧訓練",
-    "SLEEP": "睡眠",
-    "NAP": "小睡",
-    "RECOVERY": "恢復",
-    "GARMIN": "Garmin",
-    "RESTFUL_PERIOD": "放鬆時段",
-    "SLEEP_PREPARATION_RECOVERING_AND_INACTIVE": "恢復中，適合準備睡眠",
-    "SLEEP_TIME_PASSED_STRESSFUL_AND_INACTIVE": "已過睡眠時段，身體偏疲勞",
-    "BALANCE_STRESS_AND_RECOVERY": "恢復與壓力大致平衡",
-    "WELL_RECOVERED": "恢復良好",
-    "AFTER_WAKEUP_RESET": "起床後更新",
-    "UPDATE_REALTIME_VARIABLES": "即時狀態更新",
-    "NO_CHANGE_SLEEP": "睡眠後恢復時間無明顯變化",
-}
-
-
-def export_obsidian_notes(config: AppConfig) -> dict[str, int]:
+def export_obsidian_notes(
+    config: AppConfig,
+    progress_callback: ProgressCallback | None = None,
+    cancel_check: CancelCheck | None = None,
+) -> dict[str, int]:
     ensure_runtime_dirs(config)
     daily_files = sorted(config.raw_daily_dir.glob("*.json"))
-    activity_files = sorted(config.raw_activity_dir.rglob("*.json"))
+    activity_files = sorted(config.raw_activity_dir.rglob("*.json"), key=_activity_file_sort_key, reverse=True)
     if not daily_files and not activity_files:
         raise FileNotFoundError(f"No Garmin JSON snapshot files found under {config.healthdata_dir}")
 
-    daily_count = _export_daily_notes(config, daily_files)
-    activity_count = _export_activity_notes(config, activity_files)
-    return {"daily_notes": daily_count, "activity_notes": activity_count}
+    _emit_progress(progress_callback, "export_step", {"step": "準備匯出每日筆記"})
+    print(f"  - 準備匯出每日筆記，共 {len(daily_files)} 份原始資料")
+    daily_result = _export_daily_notes(config, daily_files, progress_callback=progress_callback, cancel_check=cancel_check)
+    print(f"  - 每日筆記匯出完成，共 {daily_result['total']} 篇，更新 {daily_result['updated']} 篇")
+    _emit_progress(progress_callback, "export_step", {"step": "準備匯出活動筆記"})
+    print(f"  - 準備匯出活動筆記，共 {len(activity_files)} 份原始資料")
+    activity_result = _export_activity_notes(config, activity_files, progress_callback=progress_callback, cancel_check=cancel_check)
+    print(f"  - 活動筆記匯出完成，共 {activity_result['total']} 篇，更新 {activity_result['updated']} 篇")
+    _emit_progress(progress_callback, "export_step", {"step": "準備更新 AI 分析資料"})
+    print("  - 準備更新 AI 分析資料夾")
+    ai_result = _export_ai_views(config, daily_files, activity_files, progress_callback=progress_callback, cancel_check=cancel_check)
+    print(f"  - AI 分析資料更新完成，共 {ai_result['total']} 份，更新 {ai_result['updated']} 份")
+    return {
+        "daily_notes": daily_result["total"],
+        "daily_updated": daily_result["updated"],
+        "activity_notes": activity_result["total"],
+        "activity_updated": activity_result["updated"],
+        "ai_files": ai_result["total"],
+        "ai_updated": ai_result["updated"],
+    }
 
 
-def _export_daily_notes(config: AppConfig, daily_files: list[Path]) -> int:
+def _export_daily_notes(
+    config: AppConfig,
+    daily_files: list[Path],
+    progress_callback: ProgressCallback | None = None,
+    cancel_check: CancelCheck | None = None,
+) -> dict[str, int]:
     written = 0
+    updated = 0
     daily_links: list[str] = []
+    activity_lookup = _build_activity_lookup(config)
 
-    for daily_file in sorted(daily_files, reverse=True):
+    total = len(daily_files)
+    for index, daily_file in enumerate(sorted(daily_files, reverse=True), start=1):
+        _ensure_not_cancelled(cancel_check)
         payload = _read_json(daily_file)
         day = str(payload.get("date", daily_file.stem))
+        _emit_progress(
+            progress_callback,
+            "export_progress",
+            {"step": "匯出每日筆記", "current_day": day, "progress_current": index, "progress_total": total},
+        )
         dt = datetime.strptime(day, "%Y-%m-%d")
         note_dir = config.obsidian_daily_path / dt.strftime("%Y") / dt.strftime("%m")
         note_dir.mkdir(parents=True, exist_ok=True)
@@ -116,30 +125,68 @@ def _export_daily_notes(config: AppConfig, daily_files: list[Path]) -> int:
         body = "\n\n".join(
             [
                 _render_frontmatter({"type": "garmin-daily", "date": day}),
-                f"# 每日健康摘要 - {day}",
-                _render_daily_summary(payload),
+                f"# 每日摘要 - {day}",
+                _render_daily_summary(payload, activity_lookup.get(day, [])),
                 *sections,
                 _render_collapsible_raw_data("原始每日資料", payload),
             ]
         )
-        note_path.write_text(body + "\n", encoding="utf-8")
+        if _write_if_changed(note_path, body + "\n"):
+            updated += 1
         rel = note_path.relative_to(config.obsidian_vault_path).as_posix()
         daily_links.append(f"- [[{rel[:-3]}|{day}]]")
         written += 1
 
     index_body = "\n".join(["# 每日健康索引", "", f"總筆記數：{written}", "", *daily_links])
-    (config.obsidian_index_path / "Daily Index.md").write_text(index_body + "\n", encoding="utf-8")
-    return written
+    if _write_if_changed(config.obsidian_index_path / "Daily Index.md", index_body + "\n"):
+        updated += 1
+    return {"total": written, "updated": updated}
 
 
-def _export_activity_notes(config: AppConfig, activity_files: list[Path]) -> int:
+def _build_activity_lookup(config: AppConfig) -> dict[str, list[dict[str, Any]]]:
+    lookup: dict[str, list[dict[str, Any]]] = {}
+    for activity_file in config.raw_activity_dir.rglob("*.json"):
+        payload = _read_json(activity_file)
+        activity_time = str(payload.get("startTimeLocal") or payload.get("startTimeGMT") or "")
+        activity_date = activity_time[:10]
+        if not activity_date:
+            continue
+        lookup.setdefault(activity_date, []).append(payload)
+    for activity_date, items in lookup.items():
+        lookup[activity_date] = sorted(
+            items,
+            key=lambda payload: str(payload.get("startTimeLocal") or payload.get("startTimeGMT") or ""),
+            reverse=True,
+        )
+    return lookup
+
+
+def _export_activity_notes(
+    config: AppConfig,
+    activity_files: list[Path],
+    progress_callback: ProgressCallback | None = None,
+    cancel_check: CancelCheck | None = None,
+) -> dict[str, int]:
     written = 0
+    updated = 0
     activity_links: list[str] = []
-    for activity_file in sorted(activity_files, reverse=True)[: config.activity_limit]:
+    total = len(activity_files)
+    for index, activity_file in enumerate(activity_files, start=1):
+        _ensure_not_cancelled(cancel_check)
         payload = _read_json(activity_file)
         activity_id = str(payload.get("activityId") or activity_file.stem)
-        activity_type = _activity_type_label(payload)
+        activity_type = _activity_display_name(payload)
         raw_time = str(payload.get("startTimeLocal") or payload.get("startTimeGMT") or "unknown")
+        _emit_progress(
+            progress_callback,
+            "export_progress",
+            {
+                "step": "匯出活動筆記",
+                "current_day": raw_time[:19],
+                "progress_current": index,
+                "progress_total": total,
+            },
+        )
         activity_date = raw_time[:10] if len(raw_time) >= 10 else "unknown-date"
         year = activity_date[:4] if len(activity_date) >= 4 else "unknown"
         filename_label = _safe_filename_part(activity_type)
@@ -164,14 +211,293 @@ def _export_activity_notes(config: AppConfig, activity_files: list[Path]) -> int
                 _render_collapsible_raw_data("原始活動資料", payload),
             ]
         )
-        note_path.write_text(body + "\n", encoding="utf-8")
+        if _write_if_changed(note_path, body + "\n"):
+            updated += 1
         rel = note_path.relative_to(config.obsidian_vault_path).as_posix()
         activity_links.append(f"- [[{rel[:-3]}|{activity_date} {activity_type} #{activity_id}]]")
         written += 1
 
     index_body = "\n".join(["# 活動紀錄索引", "", f"總筆記數：{written}", "", *activity_links])
-    (config.obsidian_index_path / "Activity Index.md").write_text(index_body + "\n", encoding="utf-8")
-    return written
+    if _write_if_changed(config.obsidian_index_path / "Activity Index.md", index_body + "\n"):
+        updated += 1
+    return {"total": written, "updated": updated}
+
+
+def _export_ai_views(
+    config: AppConfig,
+    daily_files: list[Path],
+    activity_files: list[Path],
+    progress_callback: ProgressCallback | None = None,
+    cancel_check: CancelCheck | None = None,
+) -> dict[str, int]:
+    ai_dir = config.obsidian_ai_path
+    ai_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_not_cancelled(cancel_check)
+
+    range_start, range_end = _load_last_sync_range(config)
+    daily_payloads = _load_daily_payloads_for_range(daily_files, range_start, range_end)
+    activity_payloads = _load_activity_payloads_for_range(activity_files, range_start, range_end)
+
+    latest_status = _render_ai_latest_status(daily_payloads, activity_payloads)
+    daily_summary = _render_ai_daily_summary(daily_payloads)
+    activity_summary = _render_ai_activity_summary(activity_payloads)
+    daily_jsonl = _render_ai_daily_jsonl(daily_payloads)
+    activity_jsonl = _render_ai_activity_jsonl(activity_payloads)
+
+    updated = 0
+    files = {
+        "latest-status.md": latest_status + "\n",
+        "daily-summary.md": daily_summary + "\n",
+        "activity-summary.md": activity_summary + "\n",
+        "daily-summary.jsonl": daily_jsonl,
+        "activity-summary.jsonl": activity_jsonl,
+    }
+    total = len(files)
+    for index, (name, content) in enumerate(files.items(), start=1):
+        _ensure_not_cancelled(cancel_check)
+        _emit_progress(
+            progress_callback,
+            "export_progress",
+            {"step": "更新 AI 分析資料", "current_day": name, "progress_current": index, "progress_total": total},
+        )
+        if _write_if_changed(ai_dir / name, content):
+            updated += 1
+    return {"total": total, "updated": updated}
+
+
+def _load_last_sync_range(config: AppConfig) -> tuple[str | None, str | None]:
+    if not config.sync_state_path.exists():
+        return None, None
+    state = _read_json(config.sync_state_path)
+    start = state.get("last_range_start")
+    end = state.get("last_range_end")
+    start_text = str(start).strip() if isinstance(start, str) else ""
+    end_text = str(end).strip() if isinstance(end, str) else ""
+    if start_text and end_text:
+        return start_text, end_text
+    return None, None
+
+
+def _load_daily_payloads_for_range(
+    daily_files: list[Path],
+    range_start: str | None,
+    range_end: str | None,
+) -> list[dict[str, Any]]:
+    payloads = [_read_json(path) for path in sorted(daily_files, reverse=True)]
+    if not (range_start and range_end):
+        return payloads
+    return [
+        payload
+        for payload in payloads
+        if range_start <= str(payload.get("date") or "") <= range_end
+    ]
+
+
+def _load_activity_payloads_for_range(
+    activity_files: list[Path],
+    range_start: str | None,
+    range_end: str | None,
+) -> list[dict[str, Any]]:
+    payloads = [_read_json(path) for path in activity_files]
+    if not (range_start and range_end):
+        return payloads
+    filtered: list[dict[str, Any]] = []
+    for payload in payloads:
+        activity_date = str(payload.get("startTimeLocal") or payload.get("startTimeGMT") or "")[:10]
+        if range_start <= activity_date <= range_end:
+            filtered.append(payload)
+    return filtered
+
+
+def _render_ai_latest_status(daily_payloads: list[dict[str, Any]], activity_payloads: list[dict[str, Any]]) -> str:
+    lines = [
+        "# AI 最新狀態",
+        "",
+        "## 用法",
+        "",
+        "- 這個資料夾是給 AI 直接掃描用的精簡入口。",
+        "- 若要做近期分析，優先讀這份 `latest-status.md`。",
+        "- 若要做跨天趨勢分析，再搭配 `daily-summary.md` 與 `activity-summary.md`。",
+        "",
+        "## 本次區間每日摘要",
+        "",
+    ]
+    for payload in daily_payloads:
+        stats = _extract_data(payload.get("stats")) or {}
+        sleep = _extract_data(payload.get("sleep")) or {}
+        hrv = _extract_data(payload.get("hrv")) or {}
+        readiness = _extract_data(payload.get("training_readiness")) or {}
+        lines.append(
+            "- "
+            + " | ".join(
+                filter(
+                    None,
+                    [
+                        str(payload.get("date", "")),
+                        f"步數 {_find_nested_value(stats, ('totalSteps',)) or '-'}",
+                        f"睡眠分數 {_find_nested_value(sleep, ('dailySleepDTO', 'sleepScores', 'overall', 'value')) or '-'}",
+                        f"HRV {_find_nested_value(hrv, ('hrvSummary', 'lastNightAvg')) or '-'}",
+                        f"訓練準備度 {_pick_training_readiness(readiness, 'score') or '-'}",
+                        f"平均壓力 {_find_nested_value(stats, ('averageStressLevel',)) or '-'}",
+                    ],
+                )
+            )
+        )
+    lines.extend(["", "## 本次區間活動摘要", ""])
+    for payload in activity_payloads:
+        lines.append(
+            "- "
+            + " | ".join(
+                filter(
+                    None,
+                    [
+                        str(payload.get("startTimeLocal", ""))[:19],
+                        _activity_display_name(payload),
+                        f"距離 {_format_distance(payload.get('distance')) or '-'}",
+                        f"時長 {_format_seconds(payload.get('duration') or payload.get('movingDuration')) or '-'}",
+                        f"平均心率 {_translate_value(payload.get('averageHR')) or '-'}",
+                        f"壓力變化 {_translate_value(payload.get('differenceStress')) or '-'}",
+                    ],
+                )
+            )
+        )
+    return "\n".join(lines).strip()
+
+
+def _render_ai_daily_summary(daily_payloads: list[dict[str, Any]]) -> str:
+    lines = [
+        "# AI 每日摘要",
+        "",
+        "## 欄位說明",
+        "",
+        "- 每一行是一個日期的精簡摘要，適合做長期趨勢分析。",
+        "",
+    ]
+    for payload in daily_payloads:
+        stats = _extract_data(payload.get("stats")) or {}
+        sleep = _extract_data(payload.get("sleep")) or {}
+        hrv = _extract_data(payload.get("hrv")) or {}
+        readiness = _extract_data(payload.get("training_readiness")) or {}
+        body_battery = _extract_data(payload.get("body_battery")) or {}
+        lines.append(
+            "- "
+            + " | ".join(
+                filter(
+                    None,
+                    [
+                        f"日期 {payload.get('date', '')}",
+                        f"步數 {_find_nested_value(stats, ('totalSteps',)) or '-'}",
+                        f"距離 {_format_distance(_find_nested_value(stats, ('totalDistanceMeters',))) or '-'}",
+                        f"靜止心率 {_find_nested_value(stats, ('restingHeartRate',)) or '-'}",
+                        f"睡眠分數 {_find_nested_value(sleep, ('dailySleepDTO', 'sleepScores', 'overall', 'value')) or '-'}",
+                        f"昨晚 HRV {_find_nested_value(hrv, ('hrvSummary', 'lastNightAvg')) or '-'}",
+                        f"訓練準備度 {_pick_training_readiness(readiness, 'score') or '-'}",
+                        f"目前身體電量 {_pick_body_battery(body_battery, 'bodyBatteryMostRecentValue') or _find_nested_value(stats, ('bodyBatteryMostRecentValue',)) or '-'}",
+                        f"平均壓力 {_find_nested_value(stats, ('averageStressLevel',)) or '-'}",
+                    ],
+                )
+            )
+        )
+    return "\n".join(lines).strip()
+
+
+def _render_ai_activity_summary(activity_payloads: list[dict[str, Any]]) -> str:
+    lines = [
+        "# AI 活動摘要",
+        "",
+        "## 欄位說明",
+        "",
+        "- 每一行是一筆活動的精簡摘要，適合做活動表現與恢復分析。",
+        "",
+    ]
+    for payload in activity_payloads:
+        lines.append(
+            "- "
+            + " | ".join(
+                filter(
+                    None,
+                    [
+                        f"日期 {str(payload.get('startTimeLocal', ''))[:19]}",
+                        f"活動 {_activity_display_name(payload)}",
+                        f"ID {payload.get('activityId', '-')}",
+                        f"距離 {_format_distance(payload.get('distance')) or '-'}",
+                        f"時長 {_format_seconds(payload.get('duration') or payload.get('movingDuration')) or '-'}",
+                        f"卡路里 {_format_calories(payload.get('calories')) or '-'}",
+                        f"平均心率 {_translate_value(payload.get('averageHR')) or '-'}",
+                        f"最高心率 {_translate_value(payload.get('maxHR')) or '-'}",
+                        f"訓練負荷 {_translate_value(payload.get('activityTrainingLoad')) or '-'}",
+                        f"身體電量變化 {_translate_value(payload.get('differenceBodyBattery')) or '-'}",
+                        f"壓力變化 {_translate_value(payload.get('differenceStress')) or '-'}",
+                    ],
+                )
+            )
+        )
+    return "\n".join(lines).strip()
+
+
+def _render_ai_daily_jsonl(daily_payloads: list[dict[str, Any]]) -> str:
+    lines = [json.dumps(_daily_ai_record(payload), ensure_ascii=False) for payload in daily_payloads]
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _render_ai_activity_jsonl(activity_payloads: list[dict[str, Any]]) -> str:
+    lines = [json.dumps(_activity_ai_record(payload), ensure_ascii=False) for payload in activity_payloads]
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _daily_ai_record(payload: dict[str, Any]) -> dict[str, Any]:
+    stats = _extract_data(payload.get("stats")) or {}
+    sleep = _extract_data(payload.get("sleep")) or {}
+    hrv = _extract_data(payload.get("hrv")) or {}
+    readiness = _extract_data(payload.get("training_readiness")) or {}
+    body_battery = _extract_data(payload.get("body_battery")) or {}
+    hydration = _extract_data(payload.get("hydration")) or {}
+    return {
+        "date": payload.get("date"),
+        "steps": _find_nested_value(stats, ("totalSteps",)),
+        "distance_meters": _find_nested_value(stats, ("totalDistanceMeters",)),
+        "resting_heart_rate": _find_nested_value(stats, ("restingHeartRate",)),
+        "sleep_score": _find_nested_value(sleep, ("dailySleepDTO", "sleepScores", "overall", "value")),
+        "sleep_seconds": _find_nested_value(sleep, ("dailySleepDTO", "sleepTimeSeconds")),
+        "hrv_last_night_avg": _find_nested_value(hrv, ("hrvSummary", "lastNightAvg")),
+        "training_readiness_score": _pick_training_readiness(readiness, "score"),
+        "body_battery_current": _pick_body_battery(body_battery, "bodyBatteryMostRecentValue")
+        or _find_nested_value(stats, ("bodyBatteryMostRecentValue",)),
+        "body_battery_high": _pick_body_battery(body_battery, "bodyBatteryHighestValue")
+        or _find_nested_value(stats, ("bodyBatteryHighestValue",)),
+        "body_battery_low": _pick_body_battery(body_battery, "bodyBatteryLowestValue")
+        or _find_nested_value(stats, ("bodyBatteryLowestValue",)),
+        "stress_avg": _find_nested_value(stats, ("averageStressLevel",)),
+        "stress_max": _find_nested_value(stats, ("maxStressLevel",)),
+        "hydration_ml": _find_nested_value(hydration, ("valueInML",)),
+    }
+
+
+def _activity_ai_record(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "activity_id": payload.get("activityId"),
+        "activity_date": str(payload.get("startTimeLocal", ""))[:10],
+        "start_time": str(payload.get("startTimeLocal", ""))[:19],
+        "activity_type": _activity_display_name(payload),
+        "activity_name": _activity_display_name(payload),
+        "duration_seconds": payload.get("duration") or payload.get("movingDuration"),
+        "distance_meters": payload.get("distance"),
+        "calories": payload.get("calories"),
+        "average_hr": payload.get("averageHR"),
+        "max_hr": payload.get("maxHR"),
+        "training_load": payload.get("activityTrainingLoad"),
+        "aerobic_effect": payload.get("aerobicTrainingEffect"),
+        "anaerobic_effect": payload.get("anaerobicTrainingEffect"),
+        "stress_change": payload.get("differenceStress"),
+        "body_battery_change": payload.get("differenceBodyBattery"),
+    }
+
+
+def _activity_file_sort_key(path: Path) -> tuple[str, str]:
+    payload = _read_json(path)
+    activity_time = str(payload.get("startTimeLocal") or payload.get("startTimeGMT") or "")
+    activity_id = str(payload.get("activityId") or path.stem)
+    return (activity_time, activity_id)
 
 
 def _render_section(name: str, payload: dict[str, Any], daily_payload: dict[str, Any] | None = None) -> str:
@@ -193,17 +519,25 @@ def _render_section(name: str, payload: dict[str, Any], daily_payload: dict[str,
     return f"## {title}\n\n{renderer(data)}"
 
 
-def _render_daily_summary(payload: dict[str, Any]) -> str:
+def _render_daily_summary(payload: dict[str, Any], day_activities: list[dict[str, Any]] | None = None) -> str:
     stats_data = _extract_data(payload.get("stats"))
     sleep_data = _extract_data(payload.get("sleep"))
     readiness_data = _extract_data(payload.get("training_readiness"))
     body_battery = _extract_data(payload.get("body_battery"))
     hrv_data = _extract_data(payload.get("hrv"))
     hydration_data = _extract_data(payload.get("hydration"))
+    day_activities = day_activities or []
 
-    items = [
-        ("步數", _find_nested_value(stats_data, ("totalSteps",))),
-        ("距離", _format_distance(_find_nested_value(stats_data, ("totalDistanceMeters",)))),
+    total_distance = sum(float(activity.get("distance") or 0) for activity in day_activities)
+    total_duration = sum(float(activity.get("duration") or activity.get("movingDuration") or 0) for activity in day_activities)
+    total_calories = sum(float(activity.get("calories") or 0) for activity in day_activities)
+    running_activities = [activity for activity in day_activities if _is_running_activity(activity)]
+    running_distance = sum(float(activity.get("distance") or 0) for activity in running_activities)
+    latest_activity = day_activities[0] if day_activities else None
+
+    daily_items = [
+        ("全天步數", _find_nested_value(stats_data, ("totalSteps",))),
+        ("全天距離", _format_distance(_find_nested_value(stats_data, ("totalDistanceMeters",)))),
         ("靜止心率", _find_nested_value(stats_data, ("restingHeartRate",))),
         ("睡眠分數", _find_nested_value(sleep_data, ("dailySleepDTO", "sleepScores", "overall", "value"))),
         ("訓練準備度", _pick_training_readiness(readiness_data, "score")),
@@ -212,12 +546,40 @@ def _render_daily_summary(payload: dict[str, Any]) -> str:
         ("昨晚 HRV", _find_nested_value(hrv_data, ("hrvSummary", "lastNightAvg"))),
         ("今日補水量", _format_ml(_find_nested_value(hydration_data, ("valueInML",)))),
     ]
-    return "\n".join(["## 今日摘要", "", _render_label_value_list(items)])
+    activity_items = [
+        ("活動次數", len(day_activities) if day_activities else 0),
+        ("活動總距離", _format_distance(total_distance) if day_activities else "0.00 公里"),
+        ("活動總時長", _format_seconds(total_duration) if day_activities else "0 分 0 秒"),
+        ("活動總卡路里", _format_calories(total_calories) if day_activities else "0 大卡"),
+        ("跑步次數", len(running_activities)),
+        ("跑步距離", _format_distance(running_distance) if running_activities else "0.00 公里"),
+        (
+            "最近活動",
+            (
+                f"{str(latest_activity.get('startTimeLocal', ''))[:16]} {_activity_display_name(latest_activity)}"
+                if latest_activity
+                else "今天沒有活動紀錄"
+            ),
+        ),
+    ]
+    return "\n".join(
+        [
+            "## 全天累積",
+            "",
+            _render_label_value_list(daily_items),
+            "",
+            "## 今日活動合計",
+            "",
+            "- 這一區只統計今天抓到的活動紀錄，不包含一般日常走路。",
+            "",
+            _render_label_value_list(activity_items),
+        ]
+    )
 
 
 def _render_activity_summary(payload: dict[str, Any]) -> str:
     items = [
-        ("活動類型", _activity_type_label(payload)),
+        ("活動類型", _activity_display_name(payload)),
         ("開始時間", payload.get("startTimeLocal")),
         ("距離", _format_distance(payload.get("distance"))),
         ("時長", _format_seconds(payload.get("duration") or payload.get("movingDuration"))),
@@ -260,8 +622,8 @@ def _render_activity_details(payload: dict[str, Any]) -> str:
 
 def _activity_overview_metrics(payload: dict[str, Any]) -> list[tuple[str, Any]]:
     return [
-        ("活動名稱", payload.get("activityName")),
-        ("活動類型", _activity_type_label(payload)),
+        ("活動名稱", _activity_display_name(payload)),
+        ("活動類型", _activity_display_name(payload)),
         ("開始時間", payload.get("startTimeLocal")),
         ("結束時間", _activity_end_time_local(payload)),
         ("卡路里", _format_calories(payload.get("calories"))),
@@ -468,7 +830,9 @@ def _render_hrv_section(data: Any) -> str:
     if not isinstance(data, dict):
         return "- 沒有資料。"
     summary = data.get("hrvSummary", {})
-    baseline = summary.get("baseline", {})
+    baseline = summary.get("baseline") if isinstance(summary, dict) else {}
+    if not isinstance(baseline, dict):
+        baseline = {}
     return _render_label_value_list(
         [
             ("昨晚平均 HRV", summary.get("lastNightAvg")),
@@ -700,149 +1064,75 @@ def _summarize_body_battery_events(events: Any) -> str:
 
 
 def _translate_value(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bool):
-        return "是" if value else "否"
-    if isinstance(value, float):
-        return f"{value:.2f}".rstrip("0").rstrip(".")
-    if isinstance(value, list):
-        return ", ".join(_translate_value(item) for item in value[:10])
-    if isinstance(value, dict):
-        if "typeKey" in value:
-            return _translate_value(value["typeKey"])
-        return json.dumps(value, ensure_ascii=False)
-    text = str(value)
-    return VALUE_TRANSLATIONS.get(text, text)
+    return _core_translate_value(value)
+
+
+def _translate_code_text(text: str) -> str:
+    return _core_translate_code_text(text)
 
 
 def _stringify(value: Any) -> str:
-    return _translate_value(value)
+    return _core_stringify(value)
 
 
 def _format_distance(value: Any) -> str:
-    try:
-        meters = float(value)
-    except (TypeError, ValueError):
-        return _translate_value(value)
-    return f"{meters / 1000:.2f} 公里"
+    return _core_format_distance(value)
 
 
 def _format_number(value: Any) -> str:
-    if value in (None, "", "null"):
-        return ""
-    if isinstance(value, float):
-        return f"{value:.2f}".rstrip("0").rstrip(".")
-    return str(value)
+    return _core_format_number(value)
 
 
 def _format_ratio(value: Any, goal: Any) -> str:
-    try:
-        current = float(value)
-        target = float(goal)
-    except (TypeError, ValueError):
-        return ""
-    if target <= 0:
-        return ""
-    return f"{(current / target) * 100:.0f}%"
+    return _core_format_ratio(value, goal)
 
 
 def _format_seconds(value: Any) -> str:
-    try:
-        seconds = int(float(value))
-    except (TypeError, ValueError):
-        return _translate_value(value)
-    if seconds <= 0:
-        return "0 分 0 秒"
-    hours, rem = divmod(seconds, 3600)
-    minutes, secs = divmod(rem, 60)
-    if hours:
-        return f"{hours} 小時 {minutes} 分 {secs} 秒"
-    return f"{minutes} 分 {secs} 秒"
+    return _core_format_seconds(value)
 
 
 def _format_milliseconds(value: Any) -> str:
-    try:
-        milliseconds = float(value)
-    except (TypeError, ValueError):
-        return _translate_value(value)
-    return _format_seconds(milliseconds / 1000)
+    return _core_format_milliseconds(value)
 
 
 def _format_calories(value: Any) -> str:
-    text = _translate_value(value)
-    return f"{text} 大卡" if text else ""
+    return _core_format_calories(value)
 
 
 def _format_ml(value: Any) -> str:
-    text = _translate_value(value)
-    return f"{text} ml" if text else ""
+    return _core_format_ml(value)
 
 
 def _format_pace(distance_m: Any, duration_s: Any) -> str:
-    try:
-        meters = float(distance_m)
-        seconds = float(duration_s)
-    except (TypeError, ValueError):
-        return ""
-    if meters <= 0 or seconds <= 0:
-        return ""
-    pace_per_km = seconds / (meters / 1000)
-    minutes = int(pace_per_km // 60)
-    secs = int(round(pace_per_km % 60))
-    if secs == 60:
-        minutes += 1
-        secs = 0
-    return f"{minutes}:{secs:02d} /公里"
+    return _core_format_pace(distance_m, duration_s)
 
 
 def _timestamp_to_local_text(value: Any) -> str:
-    try:
-        timestamp = int(float(value))
-    except (TypeError, ValueError):
-        return _format_datetime_text(value)
-    if timestamp > 10_000_000_000:
-        timestamp = timestamp / 1000
-    return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
+    return _core_timestamp_to_local_text(value)
 
 
 def _format_datetime_text(value: Any) -> str:
-    if value in (None, "", "null"):
-        return ""
-    if isinstance(value, (int, float)):
-        return _timestamp_to_local_text(value)
-    text = str(value).replace("T", " ")
-    if text.endswith(".0"):
-        text = text[:-2]
-    return text
+    return _core_format_datetime_text(value)
 
 
 def _translate_bool(value: Any) -> str:
-    return "是" if value is True else "否" if value is False else _translate_value(value)
+    return _core_translate_bool(value)
 
 
 def _activity_end_time_local(payload: dict[str, Any]) -> str:
-    end_local = _format_datetime_text(payload.get("endTimeLocal"))
-    if end_local:
-        return end_local
-    start_local = str(payload.get("startTimeLocal") or "")
-    if start_local:
-        try:
-            start_dt = datetime.strptime(start_local, "%Y-%m-%d %H:%M:%S")
-            duration_seconds = float(payload.get("elapsedDuration") or payload.get("duration") or 0)
-            if duration_seconds > 0:
-                return (start_dt + timedelta(seconds=duration_seconds)).strftime("%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            pass
-    return _format_datetime_text(payload.get("endTimeGMT"))
+    return _core_activity_end_time_local(payload)
 
 
-def _activity_type_label(payload: dict[str, Any]) -> str:
-    name = _translate_value(payload.get("activityName"))
-    if name:
-        return name
-    type_key = _stringify(payload.get("activityType", {}).get("typeKey")).lower()
-    return ACTIVITY_TYPE_LABELS.get(type_key, _translate_value(type_key or "活動"))
+def _activity_display_name(payload: dict[str, Any]) -> str:
+    return _core_activity_display_name(payload)
+
+
+def _activity_type_key(payload: dict[str, Any]) -> str:
+    return _core_activity_type_key(payload)
+
+
+def _is_running_activity(payload: dict[str, Any]) -> bool:
+    return _core_is_running_activity(payload)
 
 
 def _safe_filename_part(value: str) -> str:
@@ -888,3 +1178,19 @@ def _render_key_values(payload: Any, prefix: str = "") -> str:
 
 def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_if_changed(path: Path, content: str) -> bool:
+    if path.exists() and path.read_text(encoding="utf-8") == content:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return True
+
+
+def _emit_progress(callback: ProgressCallback | None, event: str, payload: dict[str, Any] | None = None) -> None:
+    emit_progress(callback, event, payload)
+
+
+def _ensure_not_cancelled(cancel_check: CancelCheck | None) -> None:
+    ensure_not_cancelled(cancel_check)

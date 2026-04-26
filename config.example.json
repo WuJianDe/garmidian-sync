@@ -27,7 +27,6 @@
     "activity_folder": "Activities"
   },
   "export": {
-    "daily_limit_per_section": 10,
-    "activity_limit": 200
+    "daily_limit_per_section": 10
   }
 }

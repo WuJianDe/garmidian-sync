@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import mimetypes
+import re
 import threading
 import time
 import webbrowser
@@ -18,6 +19,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from .cli import command_run
 from .config import load_config, validate_config
 from .garmin_connect_sync import initialize_storage
+from .runtime import classify_error
 
 
 FALLBACK_HTML = """<!doctype html>
@@ -86,6 +88,12 @@ class AppState:
     last_exit_code: int | None = None
     last_result: str = "尚未執行任何動作。"
     log: str = "尚未執行任何動作。"
+    progress_current: int = 0
+    progress_total: int = 0
+    current_step: str = ""
+    current_day: str = ""
+    error_category: str = ""
+    cancel_requested: bool = False
     updated_at: float = field(default_factory=time.time)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -103,12 +111,50 @@ class AppState:
             "last_sync_at": str(sync_state.get("last_sync_at", "")),
             "daily_count": len(list(config.obsidian_daily_path.rglob("*.md"))) if config.obsidian_daily_path.exists() else 0,
             "activity_count": len(list(config.obsidian_activity_path.rglob("*.md"))) if config.obsidian_activity_path.exists() else 0,
+            "progress_current": self.progress_current,
+            "progress_total": self.progress_total,
+            "current_step": self.current_step,
+            "current_day": self.current_day,
+            "error_category": self.error_category,
+            "cancel_requested": self.cancel_requested,
         }
 
 
-def _run_capture(task: Callable[[], int]) -> tuple[int, str]:
-    stdout = StringIO()
-    stderr = StringIO()
+class _StreamingBuffer(StringIO):
+    def __init__(self, state: AppState, *, is_stderr: bool = False) -> None:
+        super().__init__()
+        self._state = state
+        self._is_stderr = is_stderr
+
+    def write(self, text: str) -> int:  # type: ignore[override]
+        written = super().write(text)
+        with self._state.lock:
+            stdout_text = getattr(self._state, "_stdout_capture", "")
+            stderr_text = getattr(self._state, "_stderr_capture", "")
+            if self._is_stderr:
+                stderr_text += text
+                setattr(self._state, "_stderr_capture", stderr_text)
+            else:
+                stdout_text += text
+                setattr(self._state, "_stdout_capture", stdout_text)
+            combined = stdout_text.strip()
+            errors = stderr_text.strip()
+            if errors:
+                combined = f"{combined}\n\n[stderr]\n{errors}".strip()
+            self._state.log = combined or "尚未執行任何動作。"
+            self._state.updated_at = time.time()
+        return written
+
+    def flush(self) -> None:  # type: ignore[override]
+        return
+
+
+def _run_capture(state: AppState, task: Callable[[], int]) -> tuple[int, str]:
+    stdout = _StreamingBuffer(state)
+    stderr = _StreamingBuffer(state, is_stderr=True)
+    with state.lock:
+        setattr(state, "_stdout_capture", "")
+        setattr(state, "_stderr_capture", "")
     with redirect_stdout(stdout), redirect_stderr(stderr):
         code = task()
     output = stdout.getvalue().strip()
@@ -125,22 +171,37 @@ def _start_background_task(state: AppState, task_name: str, task: Callable[[], i
         state.running = True
         state.task_name = task_name
         state.log = f"{task_name} 啟動中..."
+        state.last_result = "執行中"
+        state.progress_current = 0
+        state.progress_total = 0
+        state.current_step = "準備啟動"
+        state.current_day = ""
+        state.error_category = ""
+        state.cancel_requested = False
         state.updated_at = time.time()
 
     def worker() -> None:
         code = 1
         output = ""
         try:
-            code, output = _run_capture(task)
+            code, output = _run_capture(state, task)
         except Exception as exc:  # noqa: BLE001
             output = f"執行時發生未處理錯誤：\n{exc}"
             code = 1
+            with state.lock:
+                state.error_category = classify_error(str(exc), output)
         with state.lock:
             state.running = False
             state.last_exit_code = code
-            state.last_result = "成功" if code == 0 else "失敗"
+            state.last_result = "已取消" if state.cancel_requested and code != 0 else ("成功" if code == 0 else "失敗")
             state.log = output
+            if code == 0:
+                state.error_category = ""
+            elif not state.error_category:
+                state.error_category = classify_error(state.last_result, output)
             state.updated_at = time.time()
+            setattr(state, "_stdout_capture", "")
+            setattr(state, "_stderr_capture", "")
 
     thread = threading.Thread(target=worker, daemon=True)
     thread.start()
@@ -214,11 +275,29 @@ def build_handler(state: AppState, frontend_dist: Path | None) -> type[BaseHTTPR
                 return
 
             action = parsed.path.rsplit("/", 1)[-1]
-            tasks: dict[str, tuple[str, Callable[[], int]]] = {
-                "run-latest": ("抓最新資料並匯出", lambda: command_run(state.config_path, full=False)),
-                "run-full": ("完整同步並匯出", lambda: command_run(state.config_path, full=True)),
-            }
-            task = tasks.get(action)
+            if action == "stop":
+                with state.lock:
+                    if not state.running:
+                        self._send_json({"error": "目前沒有執行中的任務。"}, status=HTTPStatus.CONFLICT)
+                        return
+                    state.cancel_requested = True
+                    state.current_step = "正在停止"
+                    state.updated_at = time.time()
+                self._send_json({"ok": True})
+                return
+
+            task: tuple[str, Callable[[], int]] | None = None
+            if action == "run-latest":
+                task = ("抓最新資料並匯出", _build_task_runner(state))
+            elif action == "run-range":
+                payload = self._read_json_body()
+                start_date = str(payload.get("start_date", "")).strip()
+                end_date = str(payload.get("end_date", "")).strip()
+                if not start_date or not end_date:
+                    self._send_json({"error": "請先輸入開始日期與結束日期。"}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                task = (f"區間同步並匯出（{start_date} 到 {end_date}）", _build_task_runner(state, start_date=start_date, end_date=end_date))
+
             if task is None:
                 self._send_json({"error": "Unknown action"}, status=HTTPStatus.BAD_REQUEST)
                 return
@@ -227,6 +306,18 @@ def build_handler(state: AppState, frontend_dist: Path | None) -> type[BaseHTTPR
                 self._send_json({"error": "目前已有任務執行中，請稍候。"}, status=HTTPStatus.CONFLICT)
                 return
             self._send_json({"ok": True})
+
+        def _read_json_body(self) -> dict[str, object]:
+            content_length = int(self.headers.get("Content-Length", "0") or "0")
+            if content_length <= 0:
+                return {}
+            raw = self.rfile.read(content_length)
+            if not raw:
+                return {}
+            try:
+                return json.loads(raw.decode("utf-8"))
+            except json.JSONDecodeError:
+                return {}
 
         def _serve_frontend(self, request_path: str) -> None:
             if frontend_dist is None or not frontend_dist.exists():
@@ -317,11 +408,15 @@ def _list_notes(config_path: str, kind: str) -> list[dict[str, object]]:
     if not root.exists():
         return []
     records: list[dict[str, object]] = []
-    for path in sorted(root.rglob("*.md"), key=lambda item: item.stat().st_mtime, reverse=True):
+    note_items: list[tuple[tuple[str, str, float], Path, str, str, str]] = []
+    for path in root.rglob("*.md"):
         note = path.read_text(encoding="utf-8")
         title = _extract_title(note) or path.stem
         subtitle = _extract_subtitle(path, kind)
         preview = _extract_preview(note)
+        note_items.append((_record_sort_key(root, path, note, kind), path, title, subtitle, preview))
+
+    for sort_key, path, title, subtitle, preview in sorted(note_items, key=lambda item: item[0], reverse=True):
         records.append(
             {
                 "id": path.relative_to(root).as_posix(),
@@ -329,9 +424,21 @@ def _list_notes(config_path: str, kind: str) -> list[dict[str, object]]:
                 "subtitle": subtitle,
                 "preview": preview,
                 "updated_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(path.stat().st_mtime)),
+                "sort_key": sort_key[0],
             }
         )
     return records
+
+
+def _record_sort_key(root: Path, path: Path, note: str, kind: str) -> tuple[str, str, float]:
+    relative = path.relative_to(root).as_posix()
+    if kind == "activity":
+        activity_time = _extract_frontmatter_value(note, "activity_time") or path.stem
+        return (activity_time, relative, path.stat().st_mtime)
+    note_date = _extract_frontmatter_value(note, "date")
+    match = re.match(r"(\d{4}-\d{2}-\d{2})", note_date or path.stem)
+    date_prefix = match.group(1) if match else (note_date or "")
+    return (date_prefix, relative, path.stat().st_mtime)
 
 
 def _read_note(config_path: str, kind: str, note_id: str) -> dict[str, object]:
@@ -362,6 +469,21 @@ def _extract_title(note: str) -> str:
     return ""
 
 
+def _extract_frontmatter_value(note: str, key: str) -> str:
+    if not note.startswith("---\n"):
+        return ""
+    end = note.find("\n---\n", 4)
+    if end == -1:
+        return ""
+    frontmatter = note[4:end]
+    pattern = rf"^{re.escape(key)}:\s*\"?(.*?)\"?$"
+    for line in frontmatter.splitlines():
+        match = re.match(pattern, line.strip())
+        if match:
+            return match.group(1).strip().strip('"')
+    return ""
+
+
 def _extract_subtitle(path: Path, kind: str) -> str:
     if kind == "daily":
         return path.stem
@@ -372,6 +494,7 @@ def _extract_subtitle(path: Path, kind: str) -> str:
 
 
 def _extract_preview(note: str) -> str:
+    note = _strip_frontmatter(note)
     lines = []
     for raw_line in note.splitlines():
         line = raw_line.strip()
@@ -386,15 +509,73 @@ def _extract_preview(note: str) -> str:
 
 
 def _prepare_note_content_for_web(note: str) -> str:
+    note = _strip_frontmatter(note)
     start_marker = "<details>\n<summary>原始"
     start = note.find(start_marker)
     if start == -1:
-        return note
+        return _strip_leading_title(note)
     end = note.find("</details>", start)
     if end == -1:
+        return _strip_leading_title(note)
+    cleaned = (note[:start].rstrip() + "\n\n" + note[end + len("</details>") :].lstrip()).strip()
+    return _strip_leading_title(cleaned)
+
+
+def _strip_frontmatter(note: str) -> str:
+    if not note.startswith("---\n"):
         return note
-    replacement = "## 原始資料\n\n已在網頁閱讀模式中收合。若要看完整 raw JSON，請回 Obsidian 查看。\n"
-    return note[:start].rstrip() + "\n\n" + replacement + note[end + len("</details>") :]
+    end = note.find("\n---\n", 4)
+    if end == -1:
+        return note
+    return note[end + len("\n---\n") :].lstrip()
+
+
+def _strip_leading_title(note: str) -> str:
+    lines = note.splitlines()
+    if not lines:
+        return note
+    if lines[0].startswith("# "):
+        return "\n".join(lines[1:]).lstrip()
+    return note
+
+
+def _build_task_runner(
+    state: AppState,
+    *,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> Callable[[], int]:
+    return lambda: command_run(
+        state.config_path,
+        full=False,
+        start_date=start_date,
+        end_date=end_date,
+        progress_callback=lambda event, payload: _update_progress(state, event, payload),
+        cancel_check=lambda: _is_cancel_requested(state),
+    )
+
+
+def _update_progress(state: AppState, event: str, payload: dict[str, object] | None) -> None:
+    payload = payload or {}
+    with state.lock:
+        if "step" in payload:
+            state.current_step = str(payload["step"] or "")
+        if "current_day" in payload:
+            state.current_day = str(payload["current_day"] or "")
+        if "progress_current" in payload:
+            state.progress_current = int(payload["progress_current"] or 0)
+        if "progress_total" in payload:
+            state.progress_total = int(payload["progress_total"] or 0)
+        state.updated_at = time.time()
+
+
+def _is_cancel_requested(state: AppState) -> bool:
+    with state.lock:
+        return state.cancel_requested
+
+
+def _classify_error(message: str, log: str) -> str:
+    return classify_error(message, log)
 
 
 if __name__ == "__main__":

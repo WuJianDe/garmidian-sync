@@ -53,7 +53,6 @@ class AppConfig:
     obsidian_daily_folder: str
     obsidian_activity_folder: str
     daily_limit_per_section: int
-    activity_limit: int
 
     @property
     def runtime_home(self) -> Path:
@@ -94,6 +93,10 @@ class AppConfig:
     @property
     def obsidian_index_path(self) -> Path:
         return self.obsidian_root_path / "_Indexes"
+
+    @property
+    def obsidian_ai_path(self) -> Path:
+        return self.obsidian_root_path / "AI"
 
     @property
     def credentials_source(self) -> str:
@@ -149,7 +152,6 @@ def load_config(config_path: str | Path) -> AppConfig:
         obsidian_daily_folder=str(obsidian.get("daily_folder", "Daily")),
         obsidian_activity_folder=str(obsidian.get("activity_folder", "Activities")),
         daily_limit_per_section=int(export.get("daily_limit_per_section", 10)),
-        activity_limit=int(export.get("activity_limit", 200)),
     )
 
 

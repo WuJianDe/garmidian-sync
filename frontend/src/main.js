@@ -1,4 +1,8 @@
 import "./style.css";
+import { buildActionPayload, fetchJson } from "./apiClient.js";
+import { filteredRecords as filterRecords, renderRecordList as renderRecordListView } from "./recordListView.js";
+import { applyStatusToElements } from "./statusView.js";
+import { renderViewer as renderViewerView } from "./viewerView.js";
 
 const state = {
   status: null,
@@ -19,8 +23,7 @@ app.innerHTML = `
     <section class="hero panel">
       <div class="hero-copy">
         <p class="eyebrow">Garmin x Obsidian</p>
-        <h1>健康紀錄中心</h1>
-        <p class="lead">同步 Garmin 資料、查看每日健康摘要、閱讀活動紀錄，都在同一個本機頁面完成。</p>
+        <p class="lead">同步 Garmin 資料、查看每日健康摘要與活動紀錄，都在同一個本機頁面完成。</p>
       </div>
       <div class="hero-metrics">
         <div class="metric-card">
@@ -31,31 +34,10 @@ app.innerHTML = `
           <span class="metric-label">活動筆記</span>
           <strong class="metric-value" id="activityCount">-</strong>
         </div>
-        <div class="metric-card metric-wide">
+        <div class="metric-card">
           <span class="metric-label">最後同步</span>
           <strong class="metric-small" id="lastSyncAt">-</strong>
         </div>
-        <div class="metric-card metric-wide">
-          <span class="metric-label">目前狀態</span>
-          <strong class="metric-small" id="heroStatus">待命中</strong>
-        </div>
-      </div>
-    </section>
-
-    <section class="panel action-panel">
-      <div>
-        <h2>同步操作</h2>
-        <p class="panel-copy">平常直接抓最新資料就可以；要補歷史資料時，再執行完整同步。</p>
-      </div>
-      <div class="actions">
-        <button class="btn btn-primary" data-action="run-latest">抓最新資料並匯出</button>
-        <button class="btn btn-warm" data-action="run-full">完整同步並匯出</button>
-      </div>
-      <div class="status-row">
-        <span class="status-pill" id="taskStatus">等待操作</span>
-        <span class="status-pill soft" id="taskName">目前任務：無</span>
-        <span class="status-pill soft" id="lastCode">最後狀態碼：-</span>
-        <span class="status-pill soft" id="lastResult">最近結果：-</span>
       </div>
     </section>
 
@@ -89,6 +71,44 @@ app.innerHTML = `
       </main>
     </section>
 
+    <section class="panel action-panel">
+      <div>
+        <h2>同步操作</h2>
+        <p class="panel-copy">平常直接抓最新資料；若要補指定區間，再輸入開始日與結束日執行。</p>
+      </div>
+      <div class="actions">
+        <button class="btn btn-primary" data-action="run-latest">抓最新資料並匯出</button>
+        <button class="btn btn-muted" data-action="stop">停止同步</button>
+      </div>
+      <div class="range-controls">
+        <label class="field">
+          <span class="field-label">開始日期</span>
+          <input id="rangeStartDate" class="field-input" type="date" />
+        </label>
+        <label class="field">
+          <span class="field-label">結束日期</span>
+          <input id="rangeEndDate" class="field-input" type="date" />
+        </label>
+        <button class="btn btn-warm" data-action="run-range">依區間同步並匯出</button>
+      </div>
+      <div class="status-row">
+        <span class="status-pill" id="taskStatus">等待操作</span>
+        <span class="status-pill soft" id="taskName">目前任務：無</span>
+        <span class="status-pill soft" id="lastResult">最近結果：-</span>
+        <span class="status-pill soft" id="errorCategory">錯誤分類：-</span>
+      </div>
+      <div class="progress-block">
+        <div class="progress-head">
+          <strong id="progressLabel">目前步驟：待命</strong>
+          <span id="progressMeta">0 / 0</span>
+        </div>
+        <div class="progress-bar">
+          <div id="progressFill" class="progress-fill"></div>
+        </div>
+        <div id="currentDay" class="current-day">目前日期：-</div>
+      </div>
+    </section>
+
     <section class="panel log-panel">
       <div class="log-head">
         <h2>執行紀錄</h2>
@@ -103,11 +123,14 @@ const elements = {
   dailyCount: document.querySelector("#dailyCount"),
   activityCount: document.querySelector("#activityCount"),
   lastSyncAt: document.querySelector("#lastSyncAt"),
-  heroStatus: document.querySelector("#heroStatus"),
   taskStatus: document.querySelector("#taskStatus"),
   taskName: document.querySelector("#taskName"),
-  lastCode: document.querySelector("#lastCode"),
   lastResult: document.querySelector("#lastResult"),
+  errorCategory: document.querySelector("#errorCategory"),
+  progressLabel: document.querySelector("#progressLabel"),
+  progressMeta: document.querySelector("#progressMeta"),
+  progressFill: document.querySelector("#progressFill"),
+  currentDay: document.querySelector("#currentDay"),
   logOutput: document.querySelector("#logOutput"),
   recordList: document.querySelector("#recordList"),
   searchInput: document.querySelector("#searchInput"),
@@ -118,102 +141,16 @@ const elements = {
   noteBody: document.querySelector("#noteBody"),
   actionButtons: Array.from(document.querySelectorAll("[data-action]")),
   tabButtons: Array.from(document.querySelectorAll("[data-kind]")),
+  rangeStartDate: document.querySelector("#rangeStartDate"),
+  rangeEndDate: document.querySelector("#rangeEndDate"),
 };
 
-function escapeHtml(text) {
-  return String(text)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
-}
-
-function renderMarkdownLike(text) {
-  const escaped = escapeHtml(text);
-  return escaped
-    .replace(/^### (.*)$/gm, "<h4>$1</h4>")
-    .replace(/^## (.*)$/gm, "<h3>$1</h3>")
-    .replace(/^# (.*)$/gm, "<h2>$1</h2>")
-    .replace(/^\- \*\*(.*?)\*\*：(.*)$/gm, "<div class=\"note-item\"><strong>$1</strong><span>$2</span></div>")
-    .replace(/^\- (.*)$/gm, "<div class=\"note-bullet\">$1</div>")
-    .replace(/\n\n/g, "</p><p>")
-    .replace(/^/, "<p>")
-    .replace(/$/, "</p>");
-}
-
-function filteredRecords() {
-  const records = state.records[state.activeKind] || [];
-  const query = state.query.trim().toLowerCase();
-  if (!query) return records;
-  return records.filter((record) =>
-    [record.title, record.subtitle, record.preview].filter(Boolean).join(" ").toLowerCase().includes(query),
-  );
-}
-
-function renderRecordList() {
-  const records = filteredRecords();
-  if (!records.length) {
-    elements.recordList.innerHTML = '<div class="record-empty">目前找不到符合條件的紀錄。</div>';
-    return;
-  }
-  elements.recordList.innerHTML = records
-    .map((record) => {
-      const activeClass = record.id === state.selectedId ? " active" : "";
-      return `
-        <button class="record-card${activeClass}" data-note-id="${record.id}">
-          <div class="record-title">${escapeHtml(record.title)}</div>
-          <div class="record-subtitle">${escapeHtml(record.subtitle || "")}</div>
-          <div class="record-preview">${escapeHtml(record.preview || "")}</div>
-        </button>
-      `;
-    })
-    .join("");
-
-  elements.recordList.querySelectorAll("[data-note-id]").forEach((button) => {
-    button.addEventListener("click", () => {
-      void loadNote(state.activeKind, button.dataset.noteId);
-    });
-  });
-}
-
 function renderStatus() {
-  const status = state.status;
-  if (!status) return;
-  elements.dailyCount.textContent = String(status.daily_count ?? "-");
-  elements.activityCount.textContent = String(status.activity_count ?? "-");
-  elements.lastSyncAt.textContent = status.last_sync_at || "-";
-  elements.heroStatus.textContent = status.running ? "執行中" : (status.last_result || "待命中");
-  elements.taskStatus.textContent = status.running ? "執行中" : "待命中";
-  elements.taskStatus.className = `status-pill${status.running ? " warning" : status.last_exit_code ? " danger" : ""}`;
-  elements.taskName.textContent = `目前任務：${status.task_name || "無"}`;
-  elements.lastCode.textContent = `最後狀態碼：${status.last_exit_code ?? "-"}`;
-  elements.lastResult.textContent = `最近結果：${status.last_result || "-"}`;
-  elements.logOutput.textContent = status.log || "尚未執行任何動作。";
-  elements.actionButtons.forEach((button) => {
-    button.disabled = Boolean(status.running);
-  });
+  applyStatusToElements(state.status, elements);
 }
 
 function renderViewer() {
-  if (!state.selectedNote) {
-    elements.viewerEmpty.hidden = false;
-    elements.viewerContent.hidden = true;
-    return;
-  }
-  elements.viewerEmpty.hidden = true;
-  elements.viewerContent.hidden = false;
-  elements.noteTitle.textContent = state.selectedNote.title || "未命名紀錄";
-  elements.noteMeta.textContent = [state.selectedNote.subtitle, state.selectedNote.path].filter(Boolean).join(" | ");
-  elements.noteBody.innerHTML = renderMarkdownLike(state.selectedNote.content || "");
-}
-
-async function fetchJson(url, options) {
-  const response = await fetch(url, options);
-  const payload = await response.json();
-  if (!response.ok) {
-    throw new Error(payload.error || "操作失敗");
-  }
-  return payload;
+  renderViewerView(state.selectedNote, state.activeKind, elements);
 }
 
 async function refreshStatus() {
@@ -256,12 +193,27 @@ async function loadNote(kind, noteId, silent = false) {
 
 async function runAction(action) {
   try {
-    await fetchJson(`/api/actions/${action}`, { method: "POST" });
+    const payload = buildActionPayload(action, elements.rangeStartDate.value, elements.rangeEndDate.value);
+    await fetchJson(`/api/actions/${action}`, {
+      method: "POST",
+      headers: payload ? { "Content-Type": "application/json" } : undefined,
+      body: payload ? JSON.stringify(payload) : undefined,
+    });
     await refreshStatus();
     await refreshRecords();
   } catch (error) {
     alert(error.message);
   }
+}
+
+function filteredRecordsFromState() {
+  return filterRecords(state.records[state.activeKind] || [], state.query);
+}
+
+function renderRecordList() {
+  renderRecordListView(filteredRecordsFromState(), state.selectedId, elements.recordList, (noteId) => {
+    void loadNote(state.activeKind, noteId);
+  });
 }
 
 elements.actionButtons.forEach((button) => {
