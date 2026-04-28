@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -234,11 +234,15 @@ def _export_ai_views(
     ai_dir.mkdir(parents=True, exist_ok=True)
     _ensure_not_cancelled(cancel_check)
 
-    range_start, range_end = _load_last_sync_range(config)
-    daily_payloads = _load_daily_payloads_for_range(daily_files, range_start, range_end)
-    activity_payloads = _load_activity_payloads_for_range(activity_files, range_start, range_end)
+    daily_payloads = _load_daily_payloads_for_range(daily_files, None, None)
+    activity_payloads = _load_activity_payloads_for_range(activity_files, None, None)
+    latest_daily_payloads, latest_activity_payloads = _filter_payloads_to_recent_months(
+        daily_payloads,
+        activity_payloads,
+        months=3,
+    )
 
-    latest_status = _render_ai_latest_status(daily_payloads, activity_payloads)
+    latest_status = _render_ai_latest_status(latest_daily_payloads, latest_activity_payloads)
     daily_summary = _render_ai_daily_summary(daily_payloads)
     activity_summary = _render_ai_activity_summary(activity_payloads)
     daily_jsonl = _render_ai_daily_jsonl(daily_payloads)
@@ -307,6 +311,57 @@ def _load_activity_payloads_for_range(
         if range_start <= activity_date <= range_end:
             filtered.append(payload)
     return filtered
+
+
+def _filter_payloads_to_recent_months(
+    daily_payloads: list[dict[str, Any]],
+    activity_payloads: list[dict[str, Any]],
+    months: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    anchor = _latest_payload_date(daily_payloads, activity_payloads)
+    if anchor is None:
+        return daily_payloads, activity_payloads
+    cutoff = _subtract_months(anchor, months)
+    recent_daily = [payload for payload in daily_payloads if _payload_in_range(_payload_daily_date(payload), cutoff, anchor)]
+    recent_activity = [
+        payload for payload in activity_payloads if _payload_in_range(_payload_activity_date(payload), cutoff, anchor)
+    ]
+    return recent_daily, recent_activity
+
+
+def _payload_in_range(value: date | None, start: date, end: date) -> bool:
+    return value is not None and start <= value <= end
+
+
+def _latest_payload_date(daily_payloads: list[dict[str, Any]], activity_payloads: list[dict[str, Any]]) -> date | None:
+    dates = [_payload_daily_date(payload) for payload in daily_payloads]
+    dates.extend(_payload_activity_date(payload) for payload in activity_payloads)
+    valid_dates = [value for value in dates if value is not None]
+    return max(valid_dates) if valid_dates else None
+
+
+def _payload_daily_date(payload: dict[str, Any]) -> date | None:
+    return _parse_iso_date(str(payload.get("date") or "")[:10])
+
+
+def _payload_activity_date(payload: dict[str, Any]) -> date | None:
+    return _parse_iso_date(str(payload.get("startTimeLocal") or payload.get("startTimeGMT") or "")[:10])
+
+
+def _parse_iso_date(value: str) -> date | None:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _subtract_months(value: date, months: int) -> date:
+    month_index = value.month - 1 - months
+    year = value.year + month_index // 12
+    month = month_index % 12 + 1
+    first_next_month = date(year + (month // 12), (month % 12) + 1, 1)
+    last_day = (first_next_month - timedelta(days=1)).day
+    return date(year, month, min(value.day, last_day))
 
 
 def _render_ai_latest_status(daily_payloads: list[dict[str, Any]], activity_payloads: list[dict[str, Any]]) -> str:

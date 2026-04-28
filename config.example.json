@@ -1,7 +1,5 @@
 {
   "garmin": {
-    "username": "",
-    "password": "",
     "username_env": "GARMIN_USERNAME",
     "password_env": "GARMIN_PASSWORD",
     "domain": "garmin.com",

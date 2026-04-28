@@ -96,8 +96,8 @@ class ExporterHelpersTest(unittest.TestCase):
                 """
 {
   "garmin": {
-    "username": "user",
-    "password": "pass"
+    "username_env": "GARMIN_USERNAME",
+    "password_env": "GARMIN_PASSWORD"
   },
   "storage": {
     "healthdata_dir": "./data/HealthData"
@@ -133,6 +133,75 @@ class ExporterHelpersTest(unittest.TestCase):
                 "2026-04-25",
             )
             self.assertEqual([payload["activityId"] for payload in payloads], [2])
+
+    def test_export_ai_views_keeps_history_but_limits_latest_status_to_three_months(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config_path = root / "config.local.json"
+            config_path.write_text(
+                """
+{
+  "garmin": {
+    "username_env": "GARMIN_USERNAME",
+    "password_env": "GARMIN_PASSWORD"
+  },
+  "storage": {
+    "healthdata_dir": "./data/HealthData"
+  },
+  "obsidian": {
+    "vault_path": "./vault"
+  },
+  "export": {
+    "daily_limit_per_section": 10
+  }
+}
+""".strip(),
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            config.metadata_dir.mkdir(parents=True, exist_ok=True)
+            config.sync_state_path.write_text(
+                '{"last_range_start":"2026-04-25","last_range_end":"2026-04-27"}',
+                encoding="utf-8",
+            )
+
+            old_daily = root / "2026-01-26.json"
+            edge_daily = root / "2026-01-27.json"
+            new_daily = root / "2026-04-27.json"
+            old_activity = root / "old-activity.json"
+            edge_activity = root / "edge-activity.json"
+            new_activity = root / "new-activity.json"
+            old_daily.write_text('{"date":"2026-01-26","stats":{"data":{"totalSteps":1000}}}', encoding="utf-8")
+            edge_daily.write_text('{"date":"2026-01-27","stats":{"data":{"totalSteps":1270}}}', encoding="utf-8")
+            new_daily.write_text('{"date":"2026-04-27","stats":{"data":{"totalSteps":27000}}}', encoding="utf-8")
+            old_activity.write_text(
+                '{"activityId":1,"startTimeLocal":"2026-01-26 07:00:00","activityName":"舊活動"}',
+                encoding="utf-8",
+            )
+            edge_activity.write_text(
+                '{"activityId":3,"startTimeLocal":"2026-01-27 07:00:00","activityName":"邊界活動"}',
+                encoding="utf-8",
+            )
+            new_activity.write_text(
+                '{"activityId":2,"startTimeLocal":"2026-04-27 07:00:00","activityName":"新活動"}',
+                encoding="utf-8",
+            )
+
+            exporter._export_ai_views(config, [old_daily, edge_daily, new_daily], [old_activity, edge_activity, new_activity])
+
+            latest_status = (config.obsidian_ai_path / "latest-status.md").read_text(encoding="utf-8")
+            daily_summary = (config.obsidian_ai_path / "daily-summary.md").read_text(encoding="utf-8")
+            activity_summary = (config.obsidian_ai_path / "activity-summary.md").read_text(encoding="utf-8")
+            self.assertNotIn("2026-01-26", latest_status)
+            self.assertNotIn("舊活動", latest_status)
+            self.assertIn("2026-01-27", latest_status)
+            self.assertIn("邊界活動", latest_status)
+            self.assertIn("2026-01-26", daily_summary)
+            self.assertIn("2026-01-27", daily_summary)
+            self.assertIn("2026-04-27", daily_summary)
+            self.assertIn("舊活動", activity_summary)
+            self.assertIn("邊界活動", activity_summary)
+            self.assertIn("新活動", activity_summary)
 
     def test_render_ai_latest_status_uses_full_input_range(self) -> None:
         daily_payloads = [{"date": f"2026-04-{day:02d}", "stats": {"data": {}}} for day in range(1, 17)]

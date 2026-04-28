@@ -102,20 +102,13 @@ class AppConfig:
     def credentials_source(self) -> str:
         if not (self.garmin_username and self.garmin_password):
             return "missing"
-        return "config file" if self._uses_inline_credentials else ".env or process env"
-
-    @property
-    def _uses_inline_credentials(self) -> bool:
-        with self.config_path.open("r", encoding="utf-8") as fh:
-            raw: dict[str, Any] = json.load(fh)
-        garmin = raw.get("garmin", {})
-        return bool(str(garmin.get("username", "")) or str(garmin.get("password", "")))
+        return ".env or process env"
 
 def load_config(config_path: str | Path) -> AppConfig:
     resolved = Path(config_path).resolve()
     project_root = resolved.parent
     _load_dotenv_file(project_root / ".env")
-    with resolved.open("r", encoding="utf-8") as fh:
+    with resolved.open("r", encoding="utf-8-sig") as fh:
         raw: dict[str, Any] = json.load(fh)
 
     garmin = raw.get("garmin", {})
@@ -126,8 +119,8 @@ def load_config(config_path: str | Path) -> AppConfig:
 
     garmin_username_env = str(garmin.get("username_env", "GARMIN_USERNAME"))
     garmin_password_env = str(garmin.get("password_env", "GARMIN_PASSWORD"))
-    garmin_username = str(garmin.get("username", "")) or os.environ.get(garmin_username_env, "")
-    garmin_password = str(garmin.get("password", "")) or os.environ.get(garmin_password_env, "")
+    garmin_username = os.environ.get(garmin_username_env, "")
+    garmin_password = os.environ.get(garmin_password_env, "")
 
     return AppConfig(
         project_root=project_root,
@@ -158,9 +151,9 @@ def load_config(config_path: str | Path) -> AppConfig:
 def validate_config(config: AppConfig) -> None:
     missing = []
     if not config.garmin_username:
-        missing.append(f"garmin.username or env:{config.garmin_username_env}")
+        missing.append(f"env:{config.garmin_username_env}")
     if not config.garmin_password:
-        missing.append(f"garmin.password or env:{config.garmin_password_env}")
+        missing.append(f"env:{config.garmin_password_env}")
     if not config.obsidian_vault_path:
         missing.append("obsidian.vault_path")
     if missing:

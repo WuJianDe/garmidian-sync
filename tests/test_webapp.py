@@ -62,6 +62,45 @@ activity_id: "123"
         self.assertNotIn("# 標題", rendered)
         self.assertIn("## 區塊", rendered)
 
+    def test_browser_origin_check_allows_local_dev_origins(self) -> None:
+        self.assertTrue(webapp._browser_origin_allowed("http://127.0.0.1:5173", None))
+        self.assertTrue(webapp._browser_origin_allowed("http://localhost:8765", None))
+        self.assertTrue(webapp._browser_origin_allowed(None, None))
+
+    def test_browser_origin_check_rejects_external_origins(self) -> None:
+        self.assertFalse(webapp._browser_origin_allowed("https://example.com", None))
+        self.assertFalse(webapp._browser_origin_allowed(None, "https://example.com/page"))
+
+    def test_read_note_does_not_expose_absolute_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            daily = root / "vault" / "Health" / "Garmin" / "Daily" / "2026" / "04" / "2026-04-27.md"
+            daily.parent.mkdir(parents=True, exist_ok=True)
+            daily.write_text("# 每日摘要 - 2026-04-27\n\n內容", encoding="utf-8")
+            config_path = root / "config.local.json"
+            config_path.write_text(
+                """
+{
+  "garmin": {
+    "username_env": "GARMIN_USERNAME",
+    "password_env": "GARMIN_PASSWORD"
+  },
+  "storage": {
+    "healthdata_dir": "./data/HealthData"
+  },
+  "obsidian": {
+    "vault_path": "./vault"
+  }
+}
+""".strip(),
+                encoding="utf-8",
+            )
+
+            note = webapp._read_note(str(config_path), "daily", "2026/04/2026-04-27.md")
+
+            self.assertNotIn("path", note)
+            self.assertEqual(note["title"], "每日摘要 - 2026-04-27")
+
     def test_list_notes_sorts_by_note_date_descending(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

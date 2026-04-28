@@ -88,6 +88,8 @@ GARMIN_USERNAME=your-email@example.com
 GARMIN_PASSWORD=your-garmin-password
 ```
 
+`config.local.json` 不需要也不建議放 Garmin 帳號密碼；程式會依照 `username_env` 與 `password_env` 指定的環境變數名稱讀取 `.env` 或系統環境變數。
+
 常用設定：
 
 - `garmin.latest_lookback_days`
@@ -174,6 +176,10 @@ start-web-ui.bat
 - 紀錄 API：`http://127.0.0.1:8765/api/records`
 
 開發模式：
+
+雙擊資料夾內的 `start-dev.bat`，會自動開啟 API 與前端開發伺服器，並打開前端網址。
+
+也可以手動啟動：
 
 ```powershell
 npm run dev:frontend

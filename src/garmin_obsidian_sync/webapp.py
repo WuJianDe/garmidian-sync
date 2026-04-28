@@ -79,6 +79,25 @@ FALLBACK_HTML = """<!doctype html>
 </html>
 """
 
+MAX_JSON_BODY_BYTES = 64 * 1024
+ALLOWED_BROWSER_ORIGINS = {
+    "http://127.0.0.1:8765",
+    "http://localhost:8765",
+    "http://127.0.0.1:5173",
+    "http://localhost:5173",
+}
+
+
+def _browser_origin_allowed(origin: str | None, referer: str | None) -> bool:
+    if origin:
+        return origin in ALLOWED_BROWSER_ORIGINS
+    if not referer:
+        return True
+    parsed = urlparse(referer)
+    if not parsed.scheme or not parsed.netloc:
+        return True
+    return f"{parsed.scheme}://{parsed.netloc}" in ALLOWED_BROWSER_ORIGINS
+
 
 @dataclass
 class AppState:
@@ -231,11 +250,18 @@ def build_handler(state: AppState, frontend_dist: Path | None) -> type[BaseHTTPR
             self.wfile.write(body)
 
         def _send_cors_headers(self) -> None:
-            self.send_header("Access-Control-Allow-Origin", "*")
+            origin = self.headers.get("Origin", "")
+            if origin in ALLOWED_BROWSER_ORIGINS:
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Vary", "Origin")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
         def do_OPTIONS(self) -> None:  # noqa: N802
+            if not self._request_origin_allowed():
+                self.send_response(HTTPStatus.FORBIDDEN)
+                self.end_headers()
+                return
             self.send_response(HTTPStatus.NO_CONTENT)
             self._send_cors_headers()
             self.end_headers()
@@ -269,6 +295,10 @@ def build_handler(state: AppState, frontend_dist: Path | None) -> type[BaseHTTPR
             self._serve_frontend(parsed.path)
 
         def do_POST(self) -> None:  # noqa: N802
+            if not self._request_origin_allowed():
+                self._send_json({"error": "Forbidden origin"}, status=HTTPStatus.FORBIDDEN)
+                return
+
             parsed = urlparse(self.path)
             if not parsed.path.startswith("/api/actions/"):
                 self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
@@ -290,7 +320,11 @@ def build_handler(state: AppState, frontend_dist: Path | None) -> type[BaseHTTPR
             if action == "run-latest":
                 task = ("抓最新資料並匯出", _build_task_runner(state))
             elif action == "run-range":
-                payload = self._read_json_body()
+                try:
+                    payload = self._read_json_body()
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                    return
                 start_date = str(payload.get("start_date", "")).strip()
                 end_date = str(payload.get("end_date", "")).strip()
                 if not start_date or not end_date:
@@ -308,9 +342,14 @@ def build_handler(state: AppState, frontend_dist: Path | None) -> type[BaseHTTPR
             self._send_json({"ok": True})
 
         def _read_json_body(self) -> dict[str, object]:
-            content_length = int(self.headers.get("Content-Length", "0") or "0")
+            try:
+                content_length = int(self.headers.get("Content-Length", "0") or "0")
+            except ValueError:
+                return {}
             if content_length <= 0:
                 return {}
+            if content_length > MAX_JSON_BODY_BYTES:
+                raise ValueError("Request body too large.")
             raw = self.rfile.read(content_length)
             if not raw:
                 return {}
@@ -342,6 +381,9 @@ def build_handler(state: AppState, frontend_dist: Path | None) -> type[BaseHTTPR
 
             content_type, _ = mimetypes.guess_type(target.name)
             self._send_bytes(target.read_bytes(), content_type or "application/octet-stream")
+
+        def _request_origin_allowed(self) -> bool:
+            return _browser_origin_allowed(self.headers.get("Origin"), self.headers.get("Referer"))
 
         def log_message(self, format: str, *args: object) -> None:  # noqa: A003
             return
@@ -456,7 +498,6 @@ def _read_note(config_path: str, kind: str, note_id: str) -> dict[str, object]:
         "id": note_id,
         "title": _extract_title(note) or note_path.stem,
         "subtitle": _extract_subtitle(note_path, kind),
-        "path": str(note_path),
         "content": _prepare_note_content_for_web(note),
     }
 
